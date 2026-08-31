@@ -1,0 +1,19 @@
+app: _system
+name: 通用系统界面（权限弹窗 / 系统对话框）——兜底卡
+适用包名:
+  - com.android.permissioncontroller
+  - com.google.android.permissioncontroller
+  - com.android.systemui
+  - android
+界面结构:
+  - 权限弹窗: 通常有"允许 / 拒绝"或"仅在使用中允许 / 始终允许"按钮
+  - 系统对话框: 确认 / 取消按钮
+  - Android14+照片权限: 按钮为"选择照片" / "全部允许"（不是普通"允许"）
+高效操作:
+  - 权限弹窗: 按测试用例预期点"允许"或"拒绝"（一般点允许；Android14+照片权限点"全部允许"）
+  - 确认对话框: 点确认/确定继续，点取消/拒绝放弃
+  - 运行时权限弹窗约 8 秒自动消失：出现必须立即点击（框架看门狗 start_watchdog() 检测即点）
+  - 权限处理策略: policy="allow" 点同意/允许/全部允许；policy="deny" 点拒绝/禁止 —— 同一套逻辑验证同意与拒绝路径
+验证要点:
+  - 点击后弹窗应消失，界面回到原应用
+  - 验证"进入某界面"用前台 Activity 判定（current_activity()），不要用界面文字猜测

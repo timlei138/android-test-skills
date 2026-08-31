@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# android-gui-testing skill 一键环境安装
+# 用法: bash setup.sh [--with-agent]
+set -e
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+WORKSPACE="${1:-$HOME/dsh-android-test}"
+PYTHON="${PYTHON:-python3}"
+
+echo "════════════════════════════════════════════"
+echo "  Android GUI 测试环境安装"
+echo "  工作目录: $WORKSPACE"
+echo "════════════════════════════════════════════"
+
+# 1. adb 检查
+echo "▶ 1/5 检查 adb..."
+if ! command -v adb >/dev/null; then
+    echo "  ❌ 未找到 adb，请安装 Android SDK platform-tools"
+    exit 1
+fi
+echo "  ✅ $(adb version | head -1)"
+
+# 2. 设备检查
+echo "▶ 2/5 检查设备..."
+if ! adb devices | grep -q "device$"; then
+    echo "  ❌ 未检测到已授权设备，请连接并开启 USB 调试"
+    exit 1
+fi
+adb devices -l
+echo "  ✅ 设备已连接"
+
+# 3. venv 与依赖
+echo "▶ 3/5 创建虚拟环境并安装依赖..."
+mkdir -p "$WORKSPACE"
+$PYTHON -m venv "$WORKSPACE/.venv" 2>/dev/null || { echo "  ❌ python3 venv 失败"; exit 1; }
+"$WORKSPACE/.venv/bin/pip" install -q --upgrade pip setuptools wheel 2>/dev/null || true
+"$WORKSPACE/.venv/bin/pip" install -q uiautomator2 rapidocr_onnxruntime pyyaml 2>&1 | tail -1 || true
+echo "  ✅ venv 就绪 ($WORKSPACE/.venv)"
+
+# 4. uiautomator2 设备端初始化
+echo "▶ 4/5 初始化 uiautomator2 设备端..."
+"$WORKSPACE/.venv/bin/python" -m uiautomator2 init 2>&1 | tail -2 || true
+echo "  ✅ u2 初始化完成"
+
+# 5. 拷贝框架
+echo "▶ 5/5 拷贝框架到工作目录..."
+cp -r "$HERE/framework" "$WORKSPACE/" 2>/dev/null || true
+cp -r "$HERE/cases" "$WORKSPACE/" 2>/dev/null || true
+echo "  ✅ 框架已就位: $WORKSPACE/framework"
+
+# 可选: AutoGLM agent 环境
+if [ "$1" = "--with-agent" ]; then
+    echo "▶ 可选 安装 AutoGLM agent 环境 (Python 3.10+ 需要)..."
+    if command -v python3.13 >/dev/null; then
+        python3.13 -m venv "$WORKSPACE/.venv313"
+        "$WORKSPACE/.venv313/bin/pip" install -q -e /tmp/Open-AutoGLM-main 2>/dev/null || \
+        "$WORKSPACE/.venv313/bin/pip" install -q openai rapidocr_onnxruntime pyyaml 2>/dev/null || true
+        echo "  ✅ agent 环境就绪"
+    else
+        echo "  ⚠️ 未找到 python3.13，跳过 agent 环境（不影响基础测试）"
+    fi
+fi
+
+echo ""
+echo "════════════════════════════════════════════"
+echo "✅ 安装完成！快速开始:"
+echo "  cd $WORKSPACE/framework"
+echo "  .venv 里执行: $WORKSPACE/.venv/bin/python run_case.py <用例名>.py"
+echo "  示例: $WORKSPACE/.venv/bin/python run_case.py 联想日历_174.py"
+echo "════════════════════════════════════════════"
