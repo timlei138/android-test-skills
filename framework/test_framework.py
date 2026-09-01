@@ -16,10 +16,25 @@ REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
                           "screenshots", "reports")
 ACTION_DELAY = 1.0   # 每次操作后的统一延时（防动画/时序竞态）
 
+# 弹窗自动点击词表（u2 原生 watcher 注册用）
+DIALOG_GUIDE_WORDS = ("我知道了", "知道了", "立即开始", "开始使用")
+DIALOG_ALLOW_WORDS = ("允许", "同意", "始终允许", "仅在使用中允许",
+                      "仅在使用时允许", "仅本次使用时允许", "全部允许", "选择照片")
+DIALOG_DENY_WORDS = ("拒绝并不再询问", "拒绝", "不允许", "禁止")
+
+# AI 学习词表持久化文件：AI 处理过的未知弹窗按钮自动并入，下次走快路径
+LEARNED_WORDS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "dialog_words.json")
+
 
 class TestCase:
-    def __init__(self, name, device_id=None, case_dir=None):
+    def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None):
         self.name = name
+        # 未显式传入时，从环境变量取（run_case.py 注入：用户原始输入 + 脚本路径）
+        self.user_input = user_input if user_input is not None \
+            else os.environ.get("DSH_CASE_USER_INPUT")
+        self.script_path = script_path if script_path is not None \
+            else os.environ.get("DSH_CASE_SCRIPT_PATH")
         # 唤醒屏幕并解锁
         subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
                        capture_output=True)
@@ -35,21 +50,329 @@ class TestCase:
         os.makedirs(self.case_dir, exist_ok=True)
         self._shot_idx = 0
         self._ocr = None
+        self._vision = None
+        # 弹窗 watcher 状态：单连接 + 主流程驱动，无独立线程、无并发 dump
+        self._wd_enabled = False
+        self._wd_policy = "allow"
+        # AI 未知弹窗处理：节流（同一次动作窗口内最多 N 次 AI 调用）
+        self._ai_dialog_calls = 0
+        self._ai_dialog_max = 3        # 每次动作窗口最多 AI 处理几次（防失控连环点）
+        self._ai_dialog_last = 0.0     # 上次 AI 调用时间戳
+        self._ai_dialog_interval = 8.0 # 两次 AI 调用最小间隔（秒）
+        # SQLite 记录：用例/步骤/结果入库
+        self._db = None
+        self._db_case_id = None
+        self._db_step_id = None
+        self._db_step_ord = 0
+        # 建用例记录（失败不阻塞测试）
+        try:
+            from db import get_db
+            self._db = get_db()
+            self._db_case_id = self._db.start_case(
+                self.name, str(self.d.app_current().get("package", "")),
+                user_input=self.user_input, script_path=self.script_path)
+        except Exception:
+            self._db = None
+
+    # ── 视觉模型通道（颜色/布局/OCR 盲区检查）────────────────────────
+    def _get_vision(self):
+        """懒加载视觉模型客户端（deepseek-v4-flash-vision-exp）"""
+        if self._vision is None:
+            from vision import Vision
+            self._vision = Vision()
+        return self._vision
+
+    def _vision_crop_bytes(self, rid=None, bounds=None):
+        """截取屏幕（或裁剪到元素区域），返回 PNG 字节。
+        优先按元素 bounds 裁剪：聚焦目标、省 token、判断更准。"""
+        raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+                             capture_output=True).stdout
+        if not (rid or bounds):
+            return raw
+        b = bounds
+        if b is None:
+            v = self.read_rid(rid)
+            b = v["bounds"] if v else None
+        if not b:
+            return raw
+        try:
+            from PIL import Image
+            import io
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+            x1, y1, x2, y2 = b
+            x1, y1 = max(0, x1 - 20), max(0, y1 - 20)
+            x2, y2 = min(img.width, x2 + 20), min(img.height, y2 + 20)
+            crop = img.crop((x1, y1, x2, y2))
+            buf = io.BytesIO()
+            crop.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception:
+            return raw
+
+    def vision_ask(self, prompt, rid=None, bounds=None):
+        """通用视觉问答：截图（可裁剪到元素）→ 文本结论"""
+        return self._get_vision().ask(prompt, self._vision_crop_bytes(rid=rid, bounds=bounds))
+
+    def assert_visual(self, prompt, expect, msg="视觉断言", rid=None, bounds=None):
+        """视觉断言：让视觉模型判断截图状态，期望命中关键词（expect 可含多个任一词）。
+        用于颜色/布局/样式等 UI 树读不到、像素断言又不可靠的场景。"""
+        try:
+            answer = self.vision_ask(prompt, rid=rid, bounds=bounds)
+        except Exception as e:
+            return self.record("WARN", f"{msg}: 视觉调用失败 {e}")
+        expects = [expect] if isinstance(expect, str) else list(expect)
+        ok = any(e in answer for e in expects)
+        return self.record("PASS" if ok else "FAIL",
+                           f"{msg}: 视觉模型回答={answer!r}", rid=rid)
+
+    def assert_button_state_visual(self, rid, expected, msg="视觉按钮状态断言"):
+        """视觉按钮状态断言：直接让视觉模型判断按钮置灰/可点击。
+        expected: 'grayed'=断言置灰 | 'clickable'=断言可点击。
+        替代 _region_contrast 像素法（后者只能测亮度差，对样式变化不可靠）。"""
+        state = "grayed" if expected == "grayed" else "clickable"
+        prompt = ("这个 Android 界面元素处于什么状态？请判断它是否被置灰（disabled/不可点击）。"
+                  "只回答：置灰 或 可点击。")
+        expect = ("置灰", "灰", "不可点击", "禁用") if state == "grayed" else ("可点击", "可用")
+        return self.assert_visual(prompt, expect, msg=msg, rid=rid)
+
+    def assert_grayed_visual(self, rid, msg="视觉置灰断言"):
+        """视觉置灰断言（等价 assert_button_state_visual(rid, 'grayed')）"""
+        return self.assert_button_state_visual(rid, "grayed", msg=msg)
+
+    # ── 弹窗自动点击（u2 原生 watcher，主流程驱动，零额外 dump）──────
+    def _load_learned_words(self):
+        """读取 AI 学习词表（AI 处理过的未知弹窗按钮），返回 {category: [words]}"""
+        try:
+            import json
+            with open(LEARNED_WORDS_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            return {k: list(v) for k, v in data.items()}
+        except (OSError, ValueError):
+            return {"guide": [], "allow": [], "deny": []}
+
+    def _learn_word(self, category, word):
+        """AI 命中后学习按钮文字：持久化并入词表，下次同款弹窗走快路径"""
+        if not word or len(word) > 30:
+            return
+        learned = self._load_learned_words()
+        if word in learned.get(category, []):
+            return
+        learned.setdefault(category, []).append(word)
+        try:
+            import json
+            with open(LEARNED_WORDS_FILE, "w", encoding="utf-8") as f:
+                json.dump(learned, f, ensure_ascii=False, indent=2)
+            print(f"🧠 [AI弹窗] 已学习按钮 {word!r} → {category} 词表")
+        except OSError as e:
+            print(f"[AI弹窗] 学习词表写入失败: {e}")
+
+    def _dialog_words(self, policy):
+        """当前策略下的弹窗词：内置词表 + AI 学习词表"""
+        learned = self._load_learned_words()
+        if policy == "deny":
+            return DIALOG_GUIDE_WORDS + tuple(learned.get("guide", [])) \
+                + DIALOG_DENY_WORDS + tuple(learned.get("deny", []))
+        return DIALOG_GUIDE_WORDS + tuple(learned.get("guide", [])) \
+            + DIALOG_ALLOW_WORDS + tuple(learned.get("allow", []))
+
+    def _register_dialog_watchers(self, policy=None):
+        """注册 u2 原生 watcher：命中词即点击。
+        匹配与点击都复用已 dump 的 source（PageSource），不产生新 dump。
+        检查由主流程每次 dump 后调用 _run_dialog_watchers 触发。"""
+        policy = policy or self._wd_policy
+        self._wd_policy = policy
+        try:
+            self.d.watcher.reset()
+            for w in self._dialog_words(policy):
+                self.d.watcher.when(w).click()
+        except Exception as e:
+            print(f"[watcher] 注册失败: {e}")
+
+    def _run_dialog_watchers(self, xml):
+        """在已 dump 的 XML 上运行弹窗 watcher（不重新 dump）。
+        两层：① 词表命中 → u2 watcher 点击（毫秒级）；② 词表未命中但疑似弹窗
+        → AI 视觉识别（节流 + 置信度门槛 + 次数上限），覆盖未知弹窗。"""
+        if not self._wd_enabled or not xml:
+            return
+        words = self._dialog_words(self._wd_policy)
+        if any(f'text="{w}"' in xml for w in words):
+            try:
+                from uiautomator2.xpath import PageSource
+                self.d.watcher.run(PageSource.parse(xml))
+            except Exception:
+                pass
+            return
+        # 词表未命中：疑似未知弹窗 → AI 兜底
+        self._handle_unknown_dialog(xml)
+
+    def _handle_unknown_dialog(self, xml):
+        """AI 处理未知弹窗：词表未命中时，用视觉模型识别弹窗并决策。
+        触发条件：UI 树存在可点击文本节点（说明有交互浮层/对话框）。
+        保护：节流（min 间隔）+ 次数上限（防失控连环点）+ 置信度门槛。"""
+        # 无任何可点击文本 → 不是可交互弹窗，不触发 AI
+        if not re.search(r'clickable="true"[^>]*text="[^"]+"', xml) \
+           and not re.search(r'text="[^"]+"[^>]*clickable="true"', xml):
+            return
+        # 页面内常见按钮词（非弹窗）→ 跳过，避免把 App 普通页面误判成弹窗
+        page_words = ("完成", "取消", "确定", "左转", "右转", "上一步", "下一步",
+                      "保存", "删除", "添加", "更多", "设置", "返回")
+        for w in page_words:
+            if f'text="{w}"' in xml:
+                return
+        # 节流：距上次 AI 调用不足间隔 → 跳过
+        now = time.time()
+        if now - self._ai_dialog_last < self._ai_dialog_interval:
+            return
+        # 次数上限
+        if self._ai_dialog_calls >= self._ai_dialog_max:
+            return
+        self._ai_dialog_calls += 1
+        self._ai_dialog_last = now
+        try:
+            raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+                                 capture_output=True).stdout
+            res = self._get_vision().ask_json(
+                "这是 Android 设备截图。仅当屏幕上出现【模态弹窗/对话框】（居中浮层，"
+                "背景变暗被遮罩，通常带标题和确定/取消按钮）时 is_dialog 才为 true。"
+                "普通页面上的工具栏按钮、编辑表单、列表项【不算弹窗】。"
+                "如果确认为弹窗，识别它并给出处理建议。只输出 JSON："
+                "{\"is_dialog\": true/false, \"title\": \"弹窗标题\", "
+                "\"buttons\": [\"按钮文字列表\"], "
+                "\"action\": \"close|allow|deny|skip\", "
+                "\"button_to_click\": \"建议点击的按钮完整文字\", "
+                "\"confidence\": 0到1的置信度}。"
+                "action 含义: close=点关闭/取消/知道了类按钮 dismiss 掉它; "
+                "allow=点允许/同意/确定类按钮; deny=点拒绝类按钮; "
+                "skip=不应自动点击（如需要用户选择/输入）。"
+                "没有弹窗时 is_dialog=false, action=skip。",
+                raw,
+                fields=["is_dialog", "title", "buttons", "action",
+                        "button_to_click", "confidence"])
+        except Exception as e:
+            print(f"🤖 [AI弹窗] 识别失败: {e}")
+            return
+        if not res.get("is_dialog"):
+            return
+        conf = float(res.get("confidence") or 0)
+        action = str(res.get("action") or "skip")
+        btn = str(res.get("button_to_click") or "").strip()
+        title = str(res.get("title") or "?")
+        # 决策：按当前策略 + AI 建议 + 置信度门槛
+        if conf < 0.7 or not btn:
+            print(f"🤖 [AI弹窗] 置信度不足({conf:.2f})或未给出按钮，跳过: {title}")
+            return
+        if action == "skip":
+            print(f"🤖 [AI弹窗] AI 建议不自动点击（{title}），记录后跳过")
+            self.record("WARN", f"未知弹窗需人工确认: {title} (AI 建议不自动点)")
+            return
+        if action == "deny" and self._wd_policy != "deny":
+            print(f"🤖 [AI弹窗] AI 建议拒绝但策略是 {self._wd_policy}，跳过: {title}")
+            return
+        if action == "allow" and self._wd_policy != "allow":
+            print(f"🤖 [AI弹窗] AI 建议允许但策略是 {self._wd_policy}，跳过: {title}")
+            return
+        # 执行点击：优先按按钮文字点，失败则记录
+        try:
+            # disabled 按钮点击无效，跳过并提示（如分享选择器里未选目标时的"仅此一次"）
+            import io as _io
+            xml_now = self.d.dump_hierarchy()
+            m = re.search(rf'<node[^>]*text="{re.escape(btn)}"[^>]*enabled="(true|false)"', xml_now)
+            if m and m.group(1) == "false":
+                print(f"🤖 [AI弹窗] 按钮 {btn!r} 当前 disabled，跳过（{title}）")
+                return
+            if self.d(text=btn).click_exists(timeout=0.6):
+                print(f"🤖 [AI弹窗] 已按 AI 建议点击 {btn!r}（{title}）")
+                # 学习：按钮文字并入对应词表，下次同款弹窗走快路径
+                cat = {"close": "guide", "allow": "allow", "deny": "deny"}.get(action)
+                if cat:
+                    self._learn_word(cat, btn)
+            else:
+                self.record("WARN", f"AI 建议点 {btn!r} 但未找到按钮（{title}）")
+        except Exception:
+            pass
+
+    def _check_dialogs_after_action(self, rounds=10, interval=0.5):
+        """点击/输入等动作后检查弹窗：动作常触发弹窗（可能连续多个——
+        App 提示"知道了"→ 系统权限弹窗），在窗口期内持续 dump 喂 watcher，
+        命中即点击，不提前退出窗口（权限弹窗 6-8s 自动消失，必须检测即点）。"""
+        if not self._wd_enabled:
+            return False
+        try:
+            from uiautomator2.xpath import PageSource
+        except Exception:
+            return False
+        handled = False
+        for _ in range(rounds):
+            try:
+                if not self._wd_enabled:
+                    break
+                xml = self.d.dump_hierarchy()
+                words = self._dialog_words(self._wd_policy)
+                if any(f'text="{w}"' in xml for w in words):
+                    if self.d.watcher.run(PageSource.parse(xml)):
+                        handled = True
+                else:
+                    # 词表未命中：疑似未知弹窗 → AI 兜底
+                    self._handle_unknown_dialog(xml)
+            except Exception:
+                pass
+            time.sleep(interval)
+        return handled
 
     # ── 步骤管理 ────────────────────────────────────────────────────
     def step(self, name):
         """开启一个步骤，返回 self（支持 with 或直接调用）"""
         self._cur_step = {"name": name, "results": [], "evidences": []}
         self.steps.append(self._cur_step)
+        if self._db is not None and self._db_case_id is not None:
+            try:
+                self._db_step_ord += 1
+                self._db_step_id = self._db.add_step(
+                    self._db_case_id, name, self._db_step_ord)
+            except Exception:
+                self._db_step_id = None
         print(f"\n▶ [{name}]")
         return self
 
-    def record(self, result, detail):
-        """记录一条断言结果: result ∈ {PASS, FAIL, WARN, INFO, BLOCKED}"""
-        self._cur_step["results"].append({"result": result, "detail": detail})
+    def record(self, result, detail, rid=None, evidence=True):
+        """记录一条断言结果: result ∈ {PASS, FAIL, WARN, INFO, BLOCKED}
+        - rid: 关联元素 resource-id，自动附 read_rid 状态（enabled/selected/checked/clickable）
+        - evidence: FAIL/WARN 时自动截屏留证（默认 True）
+        """
+        entry = {"result": result, "detail": detail}
+        # 状态快照：状态类断言必须记录实际状态值（以 case 为准原则）
+        if rid:
+            v = self.read_rid(rid)
+            if v:
+                states = {k: v[k] for k in ("enabled", "selected", "checked", "clickable")
+                          if k in v}
+                entry["state"] = states        # FAIL/WARN/BLOCKED 自动截屏留证（不打断正常流程）
+        if evidence and result in ("FAIL", "WARN", "BLOCKED"):
+            try:
+                self._shot_idx += 1
+                path = os.path.join(self.case_dir,
+                                    f"{self._shot_idx:02d}_证据_{result}.png")
+                subprocess.run(["adb", "exec-out", "screencap", "-p"],
+                               stdout=open(path, "wb"))
+                entry["evidence"] = path
+            except Exception:
+                pass
+        self._cur_step["results"].append(entry)
+        # 入库（失败不阻塞测试）
+        if self._db is not None and self._db_step_id is not None:
+            try:
+                self._db.add_result(self._db_step_id, result, detail,
+                                    state=entry.get("state"),
+                                    evidence=entry.get("evidence"))
+            except Exception:
+                pass
         mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
                 "BLOCKED": "⛔"}[result]
-        print(f"   {mark} {detail}")
+        print(f"   {mark} {entry['detail']}")
+        if entry.get("state"):
+            print(f"   📊 状态 {entry['state']}")
+        if entry.get("evidence"):
+            print(f"   📷 {entry['evidence']}")
         return result == "PASS"
 
     def blocked(self, reason):
@@ -67,6 +390,7 @@ class TestCase:
     def tap_rid(self, rid):
         self._el(rid=rid).click()
         time.sleep(ACTION_DELAY)
+        self._check_dialogs_after_action()
         return self
 
     def tap_text(self, text, wait=5.0):
@@ -75,6 +399,7 @@ class TestCase:
             try:
                 if self.d(text=text).click_exists(timeout=0.3):
                     time.sleep(ACTION_DELAY)
+                    self._check_dialogs_after_action()
                     return self
             except Exception:
                 pass
@@ -85,6 +410,7 @@ class TestCase:
     def el_bounds(self, rid=None, text=None, desc=None, xpath=None):
         """按 资源id/文字/内容描述/xpath 定位元素，返回 bounds (x1,y1,x2,y2) 或 None"""
         xml = self.d.dump_hierarchy()
+        self._run_dialog_watchers(xml)
         for n in re.findall(r"<node[^>]*>", xml):
             ok = False
             if rid and re.search(rf'resource-id="{re.escape(rid)}"', n):
@@ -108,6 +434,7 @@ class TestCase:
                 x1, y1, x2, y2 = b
                 self.d.click((x1 + x2) // 2, (y1 + y2) // 2)
                 time.sleep(ACTION_DELAY)
+                self._check_dialogs_after_action()
                 return self
             time.sleep(0.5)
         self.record("WARN", f"tap_el 未找到元素: rid={rid} text={text} desc={desc}")
@@ -121,6 +448,7 @@ class TestCase:
         """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）"""
         self.d.click(x, y)
         time.sleep(ACTION_DELAY)
+        self._check_dialogs_after_action()
         return self
 
     def input_text(self, rid, text):
@@ -128,6 +456,7 @@ class TestCase:
         time.sleep(ACTION_DELAY)
         self.d.send_keys(text)
         time.sleep(ACTION_DELAY)
+        self._check_dialogs_after_action()
         return self
 
     def clear_text(self, rid):
@@ -138,21 +467,23 @@ class TestCase:
         return self
 
     def read_rid(self, rid):
-        """读取元素属性字典: text/checked/enabled/clickable/bounds"""
+        """读取元素属性字典: text/checked/enabled/selected/clickable/bounds"""
         xml = self.d.dump_hierarchy()
+        self._run_dialog_watchers(xml)
         for n in re.findall(r"<node[^>]*>", xml):
             if re.search(rf'resource-id="{re.escape(rid)}"', n):
                 g = lambda k: (re.search(rf'{k}="([^"]*)"', n) or [None, None])[1] if re.search(rf'{k}="([^"]*)"', n) else None
                 b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
                 bounds = tuple(map(int, b.groups())) if b else None
                 return {"text": g("text"), "checked": g("checked"),
-                        "enabled": g("enabled"), "clickable": g("clickable"),
-                        "bounds": bounds}
+                        "enabled": g("enabled"), "selected": g("selected"),
+                        "clickable": g("clickable"), "bounds": bounds}
         return None
 
     def first_clickable(self, y_min, y_max):
         """在指定 y 区间找第一个可点击元素中心（按 y 从小到大）"""
         xml = self.d.dump_hierarchy()
+        self._run_dialog_watchers(xml)
         cands = []
         for n in re.findall(r"<node[^>]*>", xml):
             if 'clickable="true"' not in n:
@@ -222,6 +553,7 @@ class TestCase:
         """工具栏图标列表 [(cx,cy,desc,class), ...] 按 x 排序。
         元素化定位：工具栏带 [100,450] 内可点击、无文字的图标元素（日期等有文字项排除）"""
         xml = self.d.dump_hierarchy()
+        self._run_dialog_watchers(xml)
         items = []
         for n in re.findall(r"<node[^>]*>", xml):
             if 'clickable="true"' not in n:
@@ -273,121 +605,73 @@ class TestCase:
     def dismiss_first_use_dialogs(self, policy="allow", max_rounds=12, verbose=False):
         """
         处理首次使用弹窗直到主界面出现。
-        注意: Android 运行时权限弹窗约 8 秒自动消失，必须"检测即点"（click_exists 快速尝试）。
-        policy: "allow"=允许全部权限 | "deny"=拒绝全部权限
+        策略：每轮只 dump 一次 UI 树，在 XML 里字符串匹配弹窗词，
+        命中才点击（短超时）——避免旧版逐词 click_exists(timeout=1.2)
+        的累计等待（最坏 12 词 × 1.2s ≈ 14s）。
+        注意: Android 运行时权限弹窗约 8 秒自动消失，必须"检测即点"。
+        调用方在启动 App 后调用时，首轮先等 ACTION_DELAY（界面渲染/首帧未就绪
+        时 dump 会误判"无弹窗"）。
         """
-        allow_words = ["允许", "同意", "始终允许", "仅在使用中允许", "仅在使用时允许", "仅本次使用时允许", "全部允许", "选择照片"]
-        deny_words = ["拒绝并不再询问", "拒绝", "不允许", "禁止"]
-        guide_words = ["我知道了", "知道了", "立即开始", "开始使用"]
+        # 首轮前统一等待：启动/转场后界面未渲染完时，dump 会误判无弹窗
+        time.sleep(ACTION_DELAY)
         for _ in range(max_rounds):
             hit = False
-            # 1) 引导/提示弹窗（无歧义，直接关）
-            for w in guide_words:
-                if self.d(text=w).click_exists(timeout=1.2):
-                    if verbose:
-                        self.record("INFO", f"关闭引导/提示弹窗: {w}")
-                    time.sleep(0.6)
-                    hit = True
-                    break
-            if hit:
-                continue
-            # 2) 权限弹窗（按策略立即点）
-            words = allow_words if policy == "allow" else deny_words
+            # 1) 先做一次轻量 dump，字符串匹配（微秒级），命中才真正点击
+            xml = self.d.dump_hierarchy()
+            words = self._dialog_words(policy)
             for w in words:
-                if self.d(text=w).click_exists(timeout=1.2):
+                if f'text="{w}"' not in xml:
+                    continue
+                if self.d(text=w).click_exists(timeout=0.3):
                     if verbose:
                         self.record("INFO",
-                                    f"权限弹窗已{'同意' if policy=='allow' else '拒绝'}: {w}")
-                    time.sleep(0.6)
+                                    f"弹窗已{'同意' if policy=='allow' else '拒绝'}: {w}")
+                    time.sleep(ACTION_DELAY)
                     hit = True
                     break
+            if not hit:
+                # 2) 词表未命中：疑似未知弹窗 → AI 兜底（首启阶段同样适用）
+                self._handle_unknown_dialog(xml)
             if not hit:
                 return True   # 无弹窗，已进入主界面
         return False
 
-    # ── 弹窗看门狗：检测到权限/引导弹窗立即点击（8秒消失规则）────────
+    # ── 弹窗自动点击：主流程驱动，单连接，零并发 dump ────────────────
     def start_watchdog(self, policy="allow", interval=0.3, verbose=True):
         """
-        启动后台看门狗线程：持续监视界面，检测到权限/引导弹窗立即点击。
+        启用弹窗自动点击：注册 u2 原生 watcher，由主流程每次 dump 后
+        （_run_dialog_watchers）触发检查并点击，复用同一份已 dump 的 XML。
+        无独立线程、无第二个 u2 连接、无并发 dump。
         policy: "allow"=点同意/允许 | "deny"=点拒绝
-        与主流程并行，独立 u2 连接，毫秒级响应。
         """
-        import threading
-        self._wd_stop = threading.Event()
-        self._wd_policy = [policy]          # 可动态修改（线程间共享）
-        self._wd = threading.Thread(
-            target=self._watchdog_loop, args=(self._wd_policy, interval, verbose),
-            daemon=True)
-        self._wd.start()
+        self._wd_enabled = True
+        self._register_dialog_watchers(policy)
         if verbose:
-            print("🛡️  看门狗已启动 (policy=%s)" % policy)
+            print(f"🛡️  弹窗自动点击已启用 (policy={policy})")
 
     def watchdog_policy(self, policy):
-        """动态切换看门狗权限策略（allow=点同意/允许，deny=点拒绝）"""
-        if hasattr(self, "_wd_policy"):
-            self._wd_policy[0] = policy
-            print(f"🛡️  看门狗策略切换: {policy}")
+        """动态切换弹窗策略（allow=点同意/允许，deny=点拒绝）"""
+        if self._wd_enabled:
+            self._register_dialog_watchers(policy)
+        else:
+            self._wd_policy = policy
+        print(f"🛡️  弹窗策略切换: {policy}")
         return self
 
     def watchdog_pause(self):
-        """临时暂停看门狗（用于手动处理弹窗验证场景）"""
-        if hasattr(self, "_wd_pause"):
-            self._wd_pause[0] = True
-            print("🛡️  看门狗已暂停")
+        """临时暂停弹窗自动点击（用于手动处理弹窗验证场景）"""
+        self._wd_enabled = False
+        print("🛡️  弹窗自动点击已暂停")
 
     def watchdog_resume(self):
-        """恢复看门狗"""
-        if hasattr(self, "_wd_pause"):
-            self._wd_pause[0] = False
-            print("🛡️  看门狗已恢复")
-
-    def _watchdog_loop(self, policy_box, interval, verbose):
-        import uiautomator2 as u2
-        try:
-            dw = u2.connect()
-        except Exception as e:
-            print(f"[看门狗] 连接失败: {e}")
-            return
-        # 按出现频率排序：检测到即点击，轮询要快（弹窗 6-8 秒自动消失）
-        allow_words = ("同意", "允许", "仅在使用时允许", "全部允许", "选择照片",
-                       "始终允许", "仅本次使用时允许", "仅在使用中允许")
-        deny_words = ("拒绝并不再询问", "拒绝", "不允许", "禁止")
-        guide_words = ("我知道了", "知道了")
-        self._wd_pause = [False]
-        while not self._wd_stop.is_set():
-            if self._wd_pause[0]:
-                self._wd_stop.wait(interval)
-                continue
-            policy = policy_box[0]
-            words = guide_words + (allow_words if policy == "allow" else deny_words)
-            # 快速 dump 检测（~0.3s），只对存在的词做 click_exists
-            try:
-                xml = dw.dump_hierarchy()
-            except Exception:
-                self._wd_stop.wait(interval)
-                continue
-            for w in words:
-                if f'text="{w}"' not in xml:
-                    continue
-                # 弹窗可能还在滑入动画：等 0.5s 稳定后再点击
-                self._wd_stop.wait(0.5)
-                try:
-                    if dw(text=w).click_exists(timeout=0.5):
-                        if verbose:
-                            print(f"🛡️  [看门狗] 已点击弹窗按钮: {w}")
-                    else:
-                        if verbose:
-                            print(f"🛡️  [看门狗] 检测到但点击失败: {w}")
-                except Exception:
-                    pass
-                break   # 一轮只处理一个按钮
-            self._wd_stop.wait(interval)
+        """恢复弹窗自动点击"""
+        self._wd_enabled = True
+        print("🛡️  弹窗自动点击已恢复")
 
     def stop_watchdog(self):
-        """停止看门狗"""
-        if hasattr(self, "_wd_stop"):
-            self._wd_stop.set()
-            print("🛡️  看门狗已停止")
+        """停用弹窗自动点击（保留注册，_run_dialog_watchers 不再触发）"""
+        self._wd_enabled = False
+        print("🛡️  弹窗自动点击已停用")
 
     def current_package(self):
         out = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"],
@@ -482,6 +766,7 @@ class TestCase:
 
     def screen_text(self):
         xml = self.d.dump_hierarchy()
+        self._run_dialog_watchers(xml)
         return [m.group(1) for n in re.findall(r"<node[^>]*>", xml)
                 if (m := re.search(r'text="([^"]*)"', n)) and m.group(1)]
 
@@ -524,20 +809,34 @@ class TestCase:
                  f"\n**测试日期**：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
                  f"**设备**：{self.d.app_current()['package']}",
                  f"**证据目录**：{self.case_dir}\n"]
-        total = pass_n = 0
+        total = pass_n = fail_n = 0
         for s in self.steps:
             lines.append(f"\n## {s['name']}")
             for r in s["results"]:
                 total += 1
                 if r["result"] == "PASS":
                     pass_n += 1
+                elif r["result"] == "FAIL":
+                    fail_n += 1
                 mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
                         "BLOCKED": "⛔"}[r["result"]]
                 lines.append(f"- {mark} {r['detail']}")
+                if r.get("state"):
+                    lines.append(f"  - 状态: {r['state']}")
+                if r.get("evidence"):
+                    lines.append(f"  - 证据: `{r['evidence']}`")
             for ev in s["evidences"]:
                 lines.append(f"  - 证据: `{ev}`")
-        lines.append(f"\n---\n**汇总**: {pass_n}/{total} 通过")
+        lines.append(f"\n---\n**汇总**: ✅ {pass_n} 通过 / ❌ {fail_n} 失败 / 共 {total} 条断言")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         print(f"\n📄 报告已生成: {path}")
+        # 完成用例记录入库
+        if self._db is not None and self._db_case_id is not None:
+            try:
+                self._db.finish_case(
+                    self._db_case_id, path,
+                    f"✅ {pass_n} 通过 / ❌ {fail_n} 失败 / 共 {total} 条断言")
+            except Exception:
+                pass
         return path

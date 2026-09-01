@@ -8,6 +8,16 @@ import subprocess
 import sys
 import time
 
+# 用户原始输入（口述用例）：run_case.py 提取后入库
+USER_INPUT = """测试联想日历 169 号用例。
+前提：1.日历未授予相机/图库权限 2.设备无课程表（清理APP数据）
+操作步骤：
+1. 日历点击页面右上角更多按钮，选择课程表，点击"拍照导入课程表"按钮
+2. 返回课程表设置页，点击"从图库导入课程表"按钮
+预期结果：
+1. 弹出权限弹窗，选择允许后打开相机即可，选择拒绝后提示需要授予相机权限
+2. 弹出权限弹窗，可选择部分照片或全部允许，选择后可进入照片选择界面，选择拒绝后提示需要授予相册权限"""
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from test_framework import TestCase
 
@@ -15,14 +25,15 @@ PKG = "com.zui.calendar"
 
 
 def goto_course_table(t):
-    """从任意页面导航回课程表空状态页（相机/相册返回后 App 会退到主界面）"""
+    """从任意页面导航回课程表空状态页（相机/相册返回后 App 会退到主界面）
+    带重试：返回动画/权限变更异步期间图标可能短暂不可见。"""
     import subprocess as _sp
     act = t.current_activity()
     if "TimetableActivity" in act and "crop" not in act:
         # 已在课程表页（可能是展示页），看是否有导入按钮
         if any("拍照导入" in x for x in t.screen_text()):
             return True
-    # 回到主界面（多按几次返回）
+    # 回到主界面（多按几次返回，等稳定）
     for _ in range(3):
         act = t.current_activity()
         if "AllInOne" in act:
@@ -30,13 +41,23 @@ def goto_course_table(t):
         _sp.run(["adb", "shell", "input", "keyevent", "KEYCODE_BACK"],
                 capture_output=True)
         time.sleep(1)
-    # 更多 → 课程表
-    rm = t.top_rightmost_icon()
+    # 等主界面工具栏图标出现（最多 8s，覆盖返回动画/权限变更异步）
+    rm = None
+    for _ in range(8):
+        rm = t.top_rightmost_icon()
+        if rm:
+            break
+        time.sleep(1)
     if not rm:
         return False
-    t.tap_xy(*rm)
-    time.sleep(1)
-    if not any("课程表" in x for x in t.screen_text()):
+    # 更多 → 课程表（点击后重试判断，菜单弹出有动画）
+    for attempt in range(3):
+        t.tap_xy(*rm)
+        time.sleep(1.2)
+        if any("课程表" in x for x in t.screen_text()):
+            break
+        time.sleep(0.8)
+    else:
         return False
     t.tap_text("课程表")
     for _ in range(10):
@@ -144,14 +165,16 @@ def run():
 
     # ── Step2b: 图库导入-拒绝（revoke 重置）────────────────────────
     t.step("Step2b 图库导入-拒绝相册权限")
-    # 先返回课程表页
+    # 先 revoke 重置权限（权限变更可能触发 App 刷新界面，故先重置再导航）
+    t.adb_shell("pm", "revoke", PKG, "android.permission.READ_MEDIA_IMAGES")
+    t.adb_shell("pm", "revoke", PKG, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
+    t.record("INFO", "已 pm revoke 相册权限（重置前提）")
+    time.sleep(1)
+    # 再返回课程表页
     if not goto_course_table(t):
         t.record("FAIL", "重新导航到课程表页失败")
         t.stop_watchdog()
         return t.finish()
-    t.adb_shell("pm", "revoke", PKG, "android.permission.READ_MEDIA_IMAGES")
-    t.adb_shell("pm", "revoke", PKG, "android.permission.READ_MEDIA_VISUAL_USER_SELECTED")
-    t.record("INFO", "已 pm revoke 相册权限（重置前提）")
     t.watchdog_policy("deny")
     t.tap_text("从图库导入课程表")
     time.sleep(3)     # 看门狗处理: 知道了 + 拒绝

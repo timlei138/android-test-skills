@@ -23,16 +23,17 @@ adb devices -l                      # 设备在线且已授权
 
 ## 核心原则
 
-1. **元素优先定位**：resource-id > text > content-desc > 坐标（仅 Canvas/浮层等无元素场景）。坐标是最后手段，且必须从元素 bounds 推导（`el_bounds`），绝不写死。
-2. **确定性优先**：UI 树能读到的用元素定位，绝不盲猜坐标；Canvas 盲区用 OCR。
-2. **每步验证**：操作后必须重读界面确认状态变化；断言用代码，不靠模型自述。
-3. **如实分类**：产品缺陷=FAIL；环境/前置不满足=BLOCKED（⛔）；符合预期异常处理=记录说明。
-4. **每步留证**：关键步骤截图，报告附证据路径。
+1. **以用例（Case）为准**：用例的步骤与预期就是验收标准（spec）。执行后对比实际行为，**凡与 case 不符就是"不准"**——报告 FAIL 并说明差别（case 期望什么 / 实际是什么 / 差在哪），绝不反过来改 case 迁就实际行为。case 表述不清或客观上无法执行时才与用户确认。
+2. **每步留证**：关键步骤截图，报告附证据路径；状态类断言（enabled/selected/checked/clickable）要同时记录实际状态值，不能只写 PASS/FAIL。
+3. **元素优先定位**：resource-id > text > content-desc > 坐标（仅 Canvas/浮层等无元素场景）。坐标是最后手段，且必须从元素 bounds 推导（`el_bounds`），绝不写死。
+4. **确定性优先**：UI 树能读到的用元素定位，绝不盲猜坐标；Canvas 盲区用 OCR；颜色/布局等像素与 UI 树都不可靠的场景用视觉模型（`vision_ask` / `assert_button_state_visual`）。
+5. **每步验证**：操作后必须重读界面确认状态变化；断言用代码，不靠模型自述。
+6. **如实分类**：与 case 不符=FAIL（说明差别）；环境/前置不满足=BLOCKED（⛔）；case 与实际都成立但值得记录=WARN/INFO。
 
 ## 工作流
 
 1. **解析用例**：从用户消息提取 前置条件/操作步骤/预期结果。缺信息先问，不猜。
-2. **写用例脚本**（参考 `cases/联想日历_174.py`）：用框架 API 表达步骤与断言。
+2. **写用例脚本**（参考 `cases/联想日历_174.py`）：用框架 API 表达步骤与断言。**必须把用户原始口述写进脚本顶部的 `USER_INPUT = """..."""` 常量**（run_case.py 提取后随执行结果一起入库，实现 需求→脚本→结果 全链路追溯）。
 3. **执行**：`python run_case.py <用例>.py`
 4. **出报告**：框架自动生成 `screenshots/reports/<用例>_报告.md`，把结论汇报给用户。
 
@@ -52,10 +53,13 @@ t.top_bar_icons() -> [(cx,cy,desc,class),...]  # 工具栏图标（元素化，�
 t.open_more_menu()               # 打开"更多"菜单（定位+验证+重试）
 t.input_text("rid", "中文文本")   # 中文经 ADBKeyboard 输入
 t.clear_text("rid")
-t.read_rid("rid") -> {text, checked, enabled, clickable, bounds}
+t.read_rid("rid") -> {text, checked, enabled, selected, clickable, bounds}
 t.assert_text(rid, expect) / t.assert_switch(rid, "true|false")
 t.assert_length_le(rid, 20)      # 输入长度上限
-t.contrast_of(rid) / t.assert_grayed(rid, ref, ratio=0.6)  # 置灰像素断言
+t.vision_ask(prompt, rid=)       # 视觉模型问答（颜色/布局/OCR 盲区）
+t.assert_button_state_visual(rid, "grayed"|"clickable")  # 视觉按钮状态断言
+t.assert_visual(prompt, expect)  # 视觉断言：回答命中关键词
+t.contrast_of(rid) / t.assert_grayed(rid, ref, ratio=0.6)  # 置灰像素断言（旧，视觉优先）
 t.screenshot("名称")              # 截图留证
 t.ocr(y_min, y_max) -> [(x,y,conf,text)]   # Canvas 内容读取
 t.ocr_find(keyword, y_min, y_max) / t.first_clickable(y_min, y_max)
@@ -85,12 +89,30 @@ t.finish() -> 报告路径
 ## 关键技术（会话验证过的）
 
 ### 弹窗看门狗（权限/引导弹窗自动处理）
-- `t.start_watchdog(policy="allow|deny")`：后台线程 0.5s 轮询，**检测到弹窗立即点击**
-- `t.watchdog_policy("deny")` 动态切换策略（同意/拒绝同一套逻辑）
-- `t.watchdog_pause()/resume()` 暂停恢复；`t.stop_watchdog()` 停止
+- `t.start_watchdog(policy="allow|deny")`：启用弹窗自动点击（u2 原生 watcher + 主流程驱动，单连接、零并发 dump）
+- `t.watchdog_policy("deny")` 动态切换策略；`t.watchdog_pause()/resume()`；`t.stop_watchdog()`
 - 规则：**Android 运行时权限弹窗约 6-8 秒自动消失**，必须检测即点
-- Android 14+ 照片权限按钮是 **"选择照片"/"全部允许"**（不是普通"允许"）；相机是"仅在使用时允许/拒绝并不再询问"
-- 点击前等 0.5s 让弹窗动画稳定（动画中点击会落空）
+- Android 14+ 照片权限按钮是 **"选择照片"/"全部允许"**；相机是"仅在使用时允许/仅本次使用时允许/拒绝"
+- **两层处理**：
+  1. **词表快路径**（毫秒级）：`DIALOG_GUIDE_WORDS`/`DIALOG_ALLOW_WORDS`/`DIALOG_DENY_WORDS` 命中 → u2 watcher 点击
+  2. **AI 慢路径**（秒级，兜底未知弹窗）：词表未命中但 UI 树有可点击文本 → 视觉模型识别弹窗（标题/按钮/动作建议/置信度）→ 按建议点击。保护：节流 8s + 每动作窗口最多 3 次 + 置信度 ≥0.7 + 动作与策略一致（allow 策略不点拒绝类）；破坏性操作 AI 倾向点"取消"（已实测：系统"删除应用数据"弹窗 AI 正确点"取消"）
+- 词表外的新弹窗：AI 处理过一次后自动学习（按钮文字并入 `framework/dialog_words.json` 对应词表，重复自动去重），下次走快路径；也可手动编辑该文件
+
+## 测试记录（SQLite）
+
+- 每次执行自动入库 `~/dsh-android-test/test_records.db`：用例（cases）/步骤（steps）/断言结果（results，含状态快照与证据路径）
+- 命令行查看：`framework/db.py`（`python -c "import sys; sys.path.insert(0,'framework'); from db import get_db; print(get_db().list_cases())"`）
+
+## Web 前端（查看记录 + 编辑知识库，随 skill 打包分发）
+
+- **位置**：本 skill 包内（`webui.sh` 在包根目录，`framework/webui.py` + `framework/webui.html`）
+- **启动**：`./webui.sh` → 打开 http://127.0.0.1:8900（`stop`/`status`/指定端口）
+- **数据定位**（显式，不依赖脚本所在目录）：
+  - 环境变量 `DSH_ANDROID_TEST_DIR` 指定测试工作区（其下 `test_records.db` + `framework/knowledge/`）
+  - 默认 `~/dsh-android-test/`；知识库另可用 `DSH_KNOWLEDGE_DIR` 覆盖
+  - 打包给别人：对方装好 skill 后跑 `setup.sh` 建工作区，直接 `./webui.sh` 即可
+- **测试记录**页：用例列表（通过/失败徽章、搜索、筛选）→ 详情含 用户输入/脚本/状态/证据
+- **知识库**页：查看/编辑/新建 `knowledge/*.yaml`，文件名白名单防路径穿越
 
 ### 横竖屏不稳定
 - 设备可能随机旋转，**禁止写死坐标**；工具栏图标用 `top_bar_icons()`（元素化）
@@ -103,10 +125,10 @@ t.finish() -> 报告路径
   - 滑动有惯性会过冲，点按零惯性（参考 `framework/set_time_tap.py`）
 - **验证**：操作后重读 OCR 值，逐步收敛，不一次滑到底
 
-### 置灰按钮断言
-- `contrast_of(rid)` 取正常态对比度 → 清空必填项后 `assert_grayed(rid, ref)`
-- 原理：截图裁剪元素区域，比较文字与背景的亮度差；置灰时对比度显著下降
-- 注意：UI 树里 enabled/clickable 可能不变（置灰是视觉样式），必须用像素判断
+### 置灰按钮断言（视觉模型优先）
+- **首选** `assert_button_state_visual(rid, "grayed")`：视觉模型直接看按钮颜色/状态，适合"整体变淡"等像素差值测不出的样式
+- 旧方案 `contrast_of(rid)` + `assert_grayed(rid, ref)`：像素对比度法，仅测文字-背景亮度差，对"整块一起变淡"的置灰样式会误报
+- 注意：置灰是视觉样式，UI 树里 enabled/clickable 可能不变；**以 case 预期为准**，case 要求置灰而实际未置灰 = FAIL 并说明差别（附截图 + enabled/selected 状态）
 
 ### 系统弹窗/Toast
 - 弹窗：`screen_text()` 判断；Toast：logcat 或点击后 OCR 捕捉
@@ -148,6 +170,7 @@ t.finish() -> 报告路径
 
 ## 注意事项
 
+- **每步操作后统一等待 ≥1s 再截图或 dump UI**：任何点击/输入/启动/返回等操作后，先 `time.sleep(ACTION_DELAY)`（=1s）等界面动画/转场稳定，再截图或 dump_hierarchy；否则会因界面未渲染完而误判（如首启权限页还没出现就 dump，误认为"无弹窗"）。AI 写用例脚本时必须遵守，禁止"操作后立即 dump/截图"。
 - 屏幕可能锁屏：框架已自动唤醒解锁
 - `d.info` 在 Android 15+ 可能崩溃：用 `app_current`/`dump_hierarchy` 替代
 - 坐标以 u2 dump bounds 为准；选择器等系统 UI 布局可能变化 → 用 `first_clickable`/OCR 动态定位，不用写死坐标

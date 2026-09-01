@@ -8,9 +8,9 @@ Android 设备黑盒 GUI 测试技能包：**你给测试用例，它驱动设�
 # 1. 装环境（自动建 venv、装依赖、初始化设备端）
 bash setup.sh
 
-# 2. 跑示例用例
+# 2. 跑示例用例（用例在 ~/dsh-android-test/cases/，与 framework 平级）
 cd ~/dsh-android-test/framework
-~/.dsh-android-test/.venv/bin/python run_case.py 联想日历_174.py
+~/dsh-android-test/.venv/bin/python run_case.py 联想日历_174.py
 # → 自动生成 screenshots/reports/联想日历_174_报告.md
 
 # 3. 写自己的用例（参考 cases/ 示例）

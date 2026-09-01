@@ -8,6 +8,18 @@ import subprocess
 import sys
 import time
 
+# 用户原始输入（口述用例）：run_case.py 提取后入库
+USER_INPUT = """测试联想日历 170 号用例。
+前提：1. 设备已有课程表（如果没有需要先手动创建一个课程表）
+操作步骤：
+1. 进入已保存的课程表，点击右上角添加按钮
+2. 选择"图库导入"
+3. 选择固定课程表图片并完成后续导入流程
+预期结果：
+1. 可正常选择图库导入
+2. 导入成功后创建新的课程表
+3. 原有课程表未被覆盖"""
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from test_framework import TestCase
 
@@ -88,18 +100,19 @@ def run():
 
     # ── Step2: 选图 + 裁剪 + 触发解析 ──────────────────────────────
     t.step("Step2 选择固定课程表图片并完成导入流程")
-    # 相册选择器 → OCR 定位课程表图片（按"课程表/学生"文字，避免选到测试截图）
+    # 相册选择器 → OCR 定位课程表图片（按"课程表/学生"文字，全屏找，
+    # 不限 y——缩略图可能在中上部；避免选到测试截图/其它图）
     thumb = None
     for _ in range(6):
-        for x, y, c, tx in t.ocr(1200, 2032):
-            if ("课表" in tx or "学生" in tx) and y > 1200:
+        for x, y, c, tx in t.ocr(200, 1900):
+            if "课表" in tx or "学生" in tx:
                 thumb = (x, y)
                 break
         if thumb:
             break
-        # 找不到就点第一张（可能是唯一图）
         time.sleep(1)
     if not thumb:
+        # OCR 没找到文字缩略图：选相册里第一张可点击缩略图（中部区域）
         thumb = t.first_clickable(500, 1600)
     if not thumb:
         t.record("FAIL", "相册选择器未打开或无可选图片")
@@ -110,29 +123,16 @@ def run():
     texts = t.screen_text()
     if any("裁剪" in x for x in texts) or any("完成" in x for x in texts):
         t.record("PASS", "进入裁剪界面")
-        # 轮询确认裁剪完成：取最靠上的"完成"（浮层按钮，避免匹配到背景页的）
-        import subprocess as _sp
+        # 点"完成"确认裁剪（裁剪页右上角；点击后进入解析）
         confirmed = False
-        for attempt in range(15):
-            xml = t.d.dump_hierarchy()
-            best = None
-            for n in re.findall(r"<node[^>]*>", xml):
-                if 'text="完成"' not in n:
-                    continue
-                b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-                if not b:
-                    continue
-                x1, y1, x2, y2 = map(int, b.groups())
-                if best is None or y1 < best[1]:
-                    best = ((x1 + x2) // 2, (y1 + y2) // 2, y1)
-            if best:
-                _sp.run(["adb", "shell", "input", "tap", str(best[0]), str(best[1])],
-                        capture_output=True)
-            time.sleep(2)
-            texts = t.screen_text()
-            if not any("左转" in x for x in texts):   # 已离开裁剪页
-                confirmed = True
-                break
+        for attempt in range(10):
+            if t.tap_text("完成", wait=2):
+                time.sleep(2.5)
+                texts = t.screen_text()
+                if any("正在解析" in x for x in texts) or not any("左转" in x for x in texts):
+                    confirmed = True
+                    break
+            time.sleep(1)
         if not confirmed:
             t.record("FAIL", "裁剪确认未生效（仍停留裁剪页）")
             return t.finish()
@@ -163,8 +163,13 @@ def run():
         t.record("WARN", "未等到解析结果，屏幕=" + str(t.screen_text()[:6]))
         return t.finish()
 
-    # ── Step3: 验证新课表创建 + 原有课表保留 ────────────────────────
-    t.step("Step3 验证新课表创建且原课表未覆盖")
+    # ── Step3: 确认流程 → 验证新课表创建 + 原有课表保留 ─────────────
+    t.step("Step3 确认导入并验证新课表创建且原课表未覆盖")
+    # 确认流程：预览页"下一步" → 确认页"完成" → 回到课程表列表
+    if not t.tap_text("下一步", wait=4):
+        t.record("FAIL", "未找到预览页'下一步'按钮")
+        return t.finish()
+    time.sleep(2)
     if not t.tap_text("完成", wait=4):
         t.record("FAIL", "未找到确认页'完成'按钮")
         return t.finish()
@@ -174,7 +179,8 @@ def run():
     has_original = any("原课表" in x for x in texts)
     t.record("PASS" if has_original else "FAIL",
              f"原有课程表'原课表'未被覆盖: {has_original}")
-    new_created = len([x for x in texts if "课表" in x or "课程表" in x]) >= 2
+    new_created = any("学生课程表" in x for x in texts) \
+        or len([x for x in texts if "课表" in x or "课程表" in x]) >= 2
     t.record("PASS" if new_created else "FAIL",
              f"导入创建了新的课程表（列表出现 ≥2 个课表）: {texts[:8]}")
     t.screenshot("02_课程表列表")
