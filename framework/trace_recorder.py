@@ -39,9 +39,14 @@ class TraceRecorder:
     每个用例目录保留最近 max_keep 个会话（start 时自动清理更早的机器产物）。
     """
 
-    def __init__(self, storage_dir, max_keep=5):
+    def __init__(self, storage_dir, max_keep=None):
         self._trace_dir = os.path.join(storage_dir, "traces")
-        self.max_keep = max_keep
+        # max_keep：每用例保留的最近会话数。默认 0 = 不自动清理
+        # （批量 rmtree 会撞环境删除护栏中断采集，需清理时显式开启：
+        #   TraceRecorder(..., max_keep=5) 或环境变量 DSH_TRACE_MAXKEEP=5）
+        if max_keep is None:
+            max_keep = int(os.environ.get("DSH_TRACE_MAXKEEP", "0") or 0)
+        self.max_keep = max(0, max_keep)
         self.enabled = False
         self.session_dir = None
         self.ctx = None          # 语义上下文（如 probe:label），snapshot 时登记
@@ -71,11 +76,10 @@ class TraceRecorder:
     def _prune_old_sessions(self, case_root):
         """清理该用例下最旧的超量会话目录（仅限 traces/<用例>/ 内，机器产物）。
 
-        在本次新会话创建前调用，故保留 max_keep-1 个旧会话（预留本次的位），
-        使最终每个用例目录不超过 max_keep 个。按目录修改时间排序，同刻按名
-        稳定；删除失败静默（不影响采集）。
+        max_keep<1 直接跳过（默认安全）。在本次新会话创建前调用，故保留
+        max_keep-1 个旧会话（预留本次的位），最终每用例目录 ≤ max_keep 个。
         """
-        if self.max_keep <= 1 or not os.path.isdir(case_root):
+        if self.max_keep < 1 or not os.path.isdir(case_root):
             return
         try:
             subs = sorted(

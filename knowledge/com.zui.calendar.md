@@ -2,7 +2,7 @@
 
 - **app**: `com.zui.calendar`
 - 验证版本: 9.0.0.83（TB323FU）
-- 最近验证: 2026-09-03（168/169/170/172/175 五用例全通过，36 条断言）
+- 最近验证: 2026-09-03（168/169/170/172/175/176 六用例全通过，50 条断言）
 
 > 本卡是给 AI 看的操作地图：先查「标准链路」命中就照走，不要从零探路。
 > 原则：写正确的路径优先；坑只写在离对应路径最近的位置，避免堆成负面清单。
@@ -162,6 +162,31 @@ Activity: `com.zui.calendar/.timetable.management.TimeSlotSettingsActivity`
 
 - 课程/时段设置中若出现「附件/文件」入口 → 系统「打开方式」选择器 → 可能进入文件管理器
 - 从文件管理器返回后应回到原界面（Back 或页面返回键）
+
+## 176 手动创建 → 添加课程（2026-09-03 实测）
+
+### 手动创建链路（差异注意）
+- 手动创建入口 = 课程表空列表「手动创建课程表」`btnCreateManually` → EditTimetableActivity「新建课程表」页。
+- **该页 et_schedule_name 默认空且必填**：不填点「完成」会被校验拦住（页面不动）。
+  用例文本若只说"点完成"，需先填名称——175 的图库导入确认页才有默认名，手动创建页没有。
+- 保存按钮 = toolbar 右侧 `action_save`（文本「完成」）。填名后直接点它，**不要按 back 收键盘**
+  （back 会直接退出 EditTimetableActivity 丢编辑，实测踩到）。
+
+### 空课表周视图（保存后）
+- Activity = `timetable.display.TimetableActivity`。toolbar 标题=课表名，右侧/副行=当前周数（第1周）。
+- 结构：viewPager + 表头周几(tv_monday…tv_friday + _date) + recyclerView 网格（tv_section 节号 1-8 + tv_time 时间）。
+- 空格子 = `cv_empty_content`（clickable）。**点空格后出现加号浮标 `iv_add_hint`**，再点加号才进添加课程，
+  不是直接点空格弹框（176 实测）。「+」是图无文本/desc，判定用 rid 而非文本。
+- 顶栏 import/设置：action_curriculum_table_import / action_curriculum_table_settings。
+
+### 添加课程页（EditCourseActivity「新建课程」）
+- 字段 rid：课程名 `etCourseName`(必填) / 教室 `etClassroom` / 备注(老师) `etTeacher`；
+  课程时间 `llCourseTime`/`tvCourseTime`（默认"第1节"，点开选节段）；上课周数 `llCourseWeeks`/`tvCourseWeeks`
+  （默认"第1-20周"）；背景色 `llCourseColor`（行显示当前色 viewColorIndicator）。
+- 「课程背景色」点行弹出**独立 AlertDialog**（App 自定义样式，rid 均 com.zui.calendar:id/* 含 alertTitle/customPanel/buttonPanel）。
+  customPanel 内 5×2=10 个纯色块（clickable FrameLayout，无文本/desc）。**数色块用视觉模型**：
+  UI 树数 clickable 会被嵌套/装饰节点干扰（实测 25≠10），像素/文本判定不可靠；
+  视觉模型裁 customPanel 区域数色得 '10' 精确（176 已用 vision_ask 验证 PASS）。
 
 ## 验证要点
 
