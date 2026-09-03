@@ -29,24 +29,35 @@ fi
 adb devices -l
 echo "  ✅ 设备已连接"
 
-# 3. venv 与依赖
+# 3. venv 与依赖（关键步骤：失败即退出，不得伪装成功）
 echo "▶ 3/5 创建虚拟环境并安装依赖..."
 mkdir -p "$WORKSPACE"
 $PYTHON -m venv "$WORKSPACE/.venv" 2>/dev/null || { echo "  ❌ python3 venv 失败"; exit 1; }
-"$WORKSPACE/.venv/bin/pip" install -q --upgrade pip setuptools wheel 2>/dev/null || true
-"$WORKSPACE/.venv/bin/pip" install -q uiautomator2 rapidocr_onnxruntime pyyaml 2>&1 | tail -1 || true
+"$WORKSPACE/.venv/bin/pip" install -q --upgrade pip setuptools wheel
+"$WORKSPACE/.venv/bin/pip" install -q uiautomator2 rapidocr_onnxruntime \
+    || { echo "  ❌ 依赖安装失败（uiautomator2 / rapidocr_onnxruntime）"; exit 1; }
+# import 自检：装上了但 import 不了的隐性失败在这里暴露
+"$WORKSPACE/.venv/bin/python" -c "import uiautomator2, rapidocr_onnxruntime" \
+    || { echo "  ❌ 依赖 import 自检失败"; exit 1; }
 echo "  ✅ venv 就绪 ($WORKSPACE/.venv)"
 
-# 4. uiautomator2 设备端初始化
+# 4. uiautomator2 设备端初始化（设备相关、可能瞬时失败：明确告知但不阻断安装）
 echo "▶ 4/5 初始化 uiautomator2 设备端..."
-"$WORKSPACE/.venv/bin/python" -m uiautomator2 init 2>&1 | tail -2 || true
-echo "  ✅ u2 初始化完成"
+if "$WORKSPACE/.venv/bin/python" -m uiautomator2 init; then
+    echo "  ✅ u2 初始化完成"
+else
+    echo "  ⚠️ u2 init 失败（设备未连接/未授权时可稍后手动重跑）："
+    echo "     $WORKSPACE/.venv/bin/python -m uiautomator2 init"
+fi
 
-# 5. 拷贝框架
+# 5. 拷贝框架（关键步骤：失败即退出）
 echo "▶ 5/5 拷贝框架到工作目录..."
-cp -r "$HERE/framework" "$WORKSPACE/" 2>/dev/null || true
-cp -r "$HERE/cases" "$WORKSPACE/" 2>/dev/null || true
+cp -r "$HERE/framework" "$WORKSPACE/" || { echo "  ❌ 框架拷贝失败"; exit 1; }
+# 用例与知识卡留在 skill 包（单一数据源，随版本同步团队共享）
+mkdir -p "$WORKSPACE/storage/reports" "$WORKSPACE/storage/screenshots"
 echo "  ✅ 框架已就位: $WORKSPACE/framework"
+echo "  ✅ 运行产物目录: $WORKSPACE/storage/{reports,screenshots}"
+echo "  ✅ 用例/知识卡: $HERE/{cases,knowledge}（单一数据源）"
 
 # 可选: AutoGLM agent 环境
 if [ "$1" = "--with-agent" ]; then
@@ -54,7 +65,7 @@ if [ "$1" = "--with-agent" ]; then
     if command -v python3.13 >/dev/null; then
         python3.13 -m venv "$WORKSPACE/.venv313"
         "$WORKSPACE/.venv313/bin/pip" install -q -e /tmp/Open-AutoGLM-main 2>/dev/null || \
-        "$WORKSPACE/.venv313/bin/pip" install -q openai rapidocr_onnxruntime pyyaml 2>/dev/null || true
+        "$WORKSPACE/.venv313/bin/pip" install -q openai rapidocr_onnxruntime 2>/dev/null || true
         echo "  ✅ agent 环境就绪"
     else
         echo "  ⚠️ 未找到 python3.13，跳过 agent 环境（不影响基础测试）"
@@ -66,5 +77,5 @@ echo "════════════════════════�
 echo "✅ 安装完成！快速开始:"
 echo "  cd $WORKSPACE/framework"
 echo "  .venv 里执行: $WORKSPACE/.venv/bin/python run_case.py <用例名>.py"
-echo "  示例: $WORKSPACE/.venv/bin/python run_case.py 联想日历_174.py"
+echo "  示例: $WORKSPACE/.venv/bin/python run_case.py com.zui.calendar/172.py"
 echo "════════════════════════════════════════════"

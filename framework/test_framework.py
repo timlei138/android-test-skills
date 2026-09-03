@@ -12,8 +12,28 @@ from datetime import datetime
 
 import uiautomator2 as u2
 
-REPORT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                          "screenshots", "reports")
+# ── 存储分工 ──────────────────────────────────────────────────────
+# 运行产物（机器私有，不同步）→ <工作区>/storage
+#   storage/screenshots  截图证据（每次执行一个 case_<时间戳> 子目录）
+#   storage/reports      Markdown 测试报告
+# 用例与知识卡（单一数据源，随版本同步）→ <skill包>/cases、<skill包>/knowledge
+# 工作区根目录与 SQLite（db.default_test_dir）同源：环境变量 DSH_ANDROID_TEST_DIR
+# > 默认 ~/dsh-android-test。不随 framework 副本位置漂移——从 skill 包副本直接
+# 运行时，截图/报告/探查缓存仍落同一工作区，与 test_records.db 保持一致。
+try:
+    from db import default_test_dir
+    _WORKSPACE = default_test_dir()
+except Exception:                      # db 不可用时按副本位置兜底
+    _WORKSPACE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+STORAGE_DIR = os.path.join(_WORKSPACE, "storage")
+SCREENSHOT_DIR = os.path.join(STORAGE_DIR, "screenshots")
+REPORT_DIR = os.path.join(STORAGE_DIR, "reports")
+# 探查缓存（生成用例阶段复用，避免重复 dump/OCR）
+#   storage/probes/<包名>/<label>/dump.xml  UI 树
+#                            /ocr.json      OCR 结果
+#                            /meta.json     元信息（时间/包名/前台Activity）
+# 纯文本存储，agent 可直接 grep / re 检索，不必连设备
+PROBE_DIR = os.path.join(STORAGE_DIR, "probes")
 ACTION_DELAY = 1.0   # 每次操作后的统一延时（防动画/时序竞态）
 
 # 弹窗自动点击词表（u2 原生 watcher 注册用）
@@ -27,6 +47,81 @@ LEARNED_WORDS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "dialog_words.json")
 
 
+def _parse_nodes(xml):
+    """把 dump_hierarchy 的 XML 解析成节点字典列表。
+
+    统一入口：ElementTree 解析（属性顺序无关、正确处理 &quot; 等转义）。
+    dump 偶发含非法字符导致 XML 不合法时，回退到旧的逐属性正则提取。
+
+    每个节点: {rid, text, desc, cls, bounds(原始字符串),
+               bounds_xy((x1,y1,x2,y2) | None),
+               clickable/enabled/selected/checked(原始 "true"/"false" 字符串，缺失为 "")}
+    """
+    def _bounds_xy(raw):
+        m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", raw or "")
+        return tuple(map(int, m.groups())) if m else None
+
+    try:
+        import xml.etree.ElementTree as ET
+        return [{
+            "rid": el.get("resource-id") or "",
+            "text": el.get("text") or "",
+            "desc": el.get("content-desc") or "",
+            "cls": el.get("class") or "",
+            "bounds": el.get("bounds") or "",
+            "bounds_xy": _bounds_xy(el.get("bounds")),
+            "clickable": el.get("clickable") or "",
+            "enabled": el.get("enabled") or "",
+            "selected": el.get("selected") or "",
+            "checked": el.get("checked") or "",
+        } for el in ET.fromstring(xml).iter("node")]
+    except Exception:
+        pass
+    # 回退：正则提取（旧行为；对非法 XML 尽力而为）
+    out = []
+    for n in re.findall(r"<node[^>]*>", xml):
+        def _g(k, _n=n):
+            m = re.search(r'%s="([^"]*)"' % k, _n)
+            return m.group(1) if m else ""
+        out.append({
+            "rid": _g("resource-id"), "text": _g("text"),
+            "desc": _g("content-desc"), "cls": _g("class"),
+            "bounds": _g("bounds"), "bounds_xy": _bounds_xy(_g("bounds")),
+            "clickable": _g("clickable"), "enabled": _g("enabled"),
+            "selected": _g("selected"), "checked": _g("checked"),
+        })
+    return out
+
+
+class CaseAbort(Exception):
+    """必需操作失败（require_* 系列），用例应立即中止。
+    run_case.py 捕获后仍会生成报告，退出码按 FAIL（1）处理。"""
+
+
+# 最近一次完成的 TestCase 实例（finish 时登记）——run_case.py 据此取最终结论定退出码
+LAST_CASE = None
+
+
+def _resolve_serial(device_id=None):
+    """确定本用例操作的唯一设备 serial。
+
+    显式传入 device_id 则直接使用；否则要求恰好一台已授权设备：
+    零台 → 抛错（BLOCKED 语义的前置）；多台 → 抛错要求显式指定。
+    宁可在启动时崩，也不让 u2 和裸 adb 各连一台设备（操作与证据分家）。
+    """
+    if device_id:
+        return device_id
+    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    devs = [l.split()[0] for l in out.splitlines()[1:]
+            if len(l.split()) >= 2 and l.split()[1] == "device"]
+    if not devs:
+        raise RuntimeError("adb 无已授权设备（adb devices 无 device 状态的行）")
+    if len(devs) > 1:
+        raise RuntimeError(
+            f"检测到多台设备 {devs}，请 TestCase(device_id=...) 显式指定一台")
+    return devs[0]
+
+
 class TestCase:
     def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None):
         self.name = name
@@ -35,21 +130,41 @@ class TestCase:
             else os.environ.get("DSH_CASE_USER_INPUT")
         self.script_path = script_path if script_path is not None \
             else os.environ.get("DSH_CASE_SCRIPT_PATH")
+        # 设备绑定：整个用例生命周期内所有 adb/u2 操作锁定同一 serial
+        self.serial = _resolve_serial(device_id)
         # 唤醒屏幕并解锁
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+        subprocess.run(self._adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"),
                        capture_output=True)
-        subprocess.run(["adb", "shell", "wm", "dismiss-keyguard"], capture_output=True)
+        subprocess.run(self._adb("shell", "wm", "dismiss-keyguard"),
+                       capture_output=True)
         time.sleep(0.5)
-        self.d = u2.connect(device_id)
+        self.d = u2.connect(self.serial)
+        # 设备信息（报告与数据库留痕：操作/断言/证据属于哪台机器）
+        self.device_info = self._probe_device_info()
+        # 状态检测（framework/states.py）：可执行的确定性判断，不占 AI 上下文
+        # 用法: t.states.is_xxx()（场景卡 knowledge/scenarios/*.md 写「判定命令」即自动注册）
+        try:
+            # 直接跑用例时 framework/ 未必在 sys.path（run_case.py 会加，
+            # 但 `import test_framework` 的其它入口不一定），这里兜一下。
+            import os as _os, sys as _sys
+            _fw = _os.path.dirname(_os.path.abspath(__file__))
+            if _fw not in _sys.path:
+                _sys.path.insert(0, _fw)
+            from states import States
+            self.states = States(serial=self.serial)
+        except Exception as e:
+            print(f"[states] 状态检测初始化失败（不影响主流程）: {e}")
+            self.states = None      # states.py 缺失时不影响主流程
         self.steps = []
         self._cur_step = None
+        self._step_start_time = None
+        self._case_start_time = time.time()
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.case_dir = case_dir or os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "screenshots", f"case_{ts}")
+        self.case_dir = case_dir or os.path.join(SCREENSHOT_DIR, f"case_{ts}")
         os.makedirs(self.case_dir, exist_ok=True)
         self._shot_idx = 0
         self._ocr = None
+        self._dump_count = 0
         self._vision = None
         # 弹窗 watcher 状态：单连接 + 主流程驱动，无独立线程、无并发 dump
         self._wd_enabled = False
@@ -64,15 +179,59 @@ class TestCase:
         self._db_case_id = None
         self._db_step_id = None
         self._db_step_ord = 0
-        # 建用例记录（失败不阻塞测试）
+        # SQLite 记录：只记正式用例。判定标准 = script_path 是否有值：
+        #   - 经 run_case.py 执行 → 注入 DSH_CASE_SCRIPT_PATH → 正式用例，入库
+        #   - AI 直接跑临时脚本探查页面（无 script_path）→ 不入库，
+        #     探查是执行过程的中间数据，不是测试结果（用户确认的规则）
+        if self.script_path:
+            try:
+                from db import get_db
+                self._db = get_db()
+                self._db_case_id = self._db.start_case(
+                    self.name, self.device_info,
+                    user_input=self.user_input, script_path=self.script_path)
+            except Exception as e:
+                # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
+                print(f"⚠️ [db] 用例入库失败（测试继续，但本次执行无记录）: {e}")
+                self._db = None
+
+    # ── 设备命令（统一带 serial，多设备时不会操作错机器）─────────────
+    def _adb(self, *args):
+        """构造绑定本用例 serial 的 adb 命令列表。"""
+        return ["adb", "-s", self.serial, *args]
+
+    def _dump(self):
+        """UI 树采集统一入口：计数 + 单点 dump。
+
+        所有 dump_hierarchy 调用必须走这里，便于量化每用例的 UI 采集成本
+        （finish() 会打印总次数）。弹窗看门狗由各调用方拿到 xml 后喂
+        _run_dialog_watchers，不在这里做——保持"采集"与"检查"解耦。
+        """
+        # 单测用 object.__new__(TestCase) 绕过 __init__，此计数属性可能缺失；
+        # 惰性补齐，避免纯逻辑单测因未初始化而报错。
+        if not hasattr(self, "_dump_count"):
+            self._dump_count = 0
+        self._dump_count += 1
+        return self.d.dump_hierarchy()
+
+    def _probe_device_info(self):
+        """采集设备身份信息：serial + 型号 + Android 版本 + 屏幕尺寸。"""
+        def _gp(k):
+            r = subprocess.run(self._adb("shell", "getprop", k),
+                               capture_output=True, text=True)
+            return r.stdout.strip()
         try:
-            from db import get_db
-            self._db = get_db()
-            self._db_case_id = self._db.start_case(
-                self.name, str(self.d.app_current().get("package", "")),
-                user_input=self.user_input, script_path=self.script_path)
+            model = _gp("ro.product.model") or "未知型号"
+            ver = _gp("ro.build.version.release") or "?"
+            size = ""
+            r = subprocess.run(self._adb("shell", "wm", "size"),
+                               capture_output=True, text=True)
+            m = re.search(r"(\d+x\d+)", r.stdout)
+            if m:
+                size = f"，{m.group(1)}"
+            return f"{self.serial}（{model}，Android {ver}{size}）"
         except Exception:
-            self._db = None
+            return self.serial
 
     # ── 视觉模型通道（颜色/布局/OCR 盲区检查）────────────────────────
     def _get_vision(self):
@@ -85,7 +244,7 @@ class TestCase:
     def _vision_crop_bytes(self, rid=None, bounds=None):
         """截取屏幕（或裁剪到元素区域），返回 PNG 字节。
         优先按元素 bounds 裁剪：聚焦目标、省 token、判断更准。"""
-        raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                              capture_output=True).stdout
         if not (rid or bounds):
             return raw
@@ -229,7 +388,7 @@ class TestCase:
         self._ai_dialog_calls += 1
         self._ai_dialog_last = now
         try:
-            raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+            raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                                  capture_output=True).stdout
             res = self._get_vision().ask_json(
                 "这是 Android 设备截图。仅当屏幕上出现【模态弹窗/对话框】（居中浮层，"
@@ -275,7 +434,7 @@ class TestCase:
         try:
             # disabled 按钮点击无效，跳过并提示（如分享选择器里未选目标时的"仅此一次"）
             import io as _io
-            xml_now = self.d.dump_hierarchy()
+            xml_now = self._dump()
             m = re.search(rf'<node[^>]*text="{re.escape(btn)}"[^>]*enabled="(true|false)"', xml_now)
             if m and m.group(1) == "false":
                 print(f"🤖 [AI弹窗] 按钮 {btn!r} 当前 disabled，跳过（{title}）")
@@ -291,10 +450,24 @@ class TestCase:
         except Exception:
             pass
 
-    def _check_dialogs_after_action(self, rounds=10, interval=0.5):
-        """点击/输入等动作后检查弹窗：动作常触发弹窗（可能连续多个——
-        App 提示"知道了"→ 系统权限弹窗），在窗口期内持续 dump 喂 watcher，
-        命中即点击，不提前退出窗口（权限弹窗 6-8s 自动消失，必须检测即点）。"""
+    def _check_dialogs_after_action(self, rounds=3, interval=0.5):
+        """点击/输入等普通动作后的弹窗检查窗口（默认 3 轮 ≈1.5s）。
+
+        窗口缩短后漏掉的弹窗不会丢：后续 wait_rid/wait_text/el_bounds 等
+        轮询的每次 dump 仍会喂 _run_dialog_watchers，持续兜底。
+        首启/授权/安装等高风险动作（弹窗可能在数秒后才冒出）用
+        observe_dialogs(rounds=10) 显式开长窗口。
+        """
+        return self._observe_dialogs_window(rounds, interval)
+
+    def observe_dialogs(self, rounds=10, interval=0.5):
+        """高风险动作（首启/授权/安装/弹窗级联）后的长观察窗口。
+        用例与 _flow.py 在这类动作后显式调用：t.observe_dialogs()。"""
+        return self._observe_dialogs_window(rounds, interval)
+
+    def _observe_dialogs_window(self, rounds, interval):
+        """在窗口期内持续 dump 喂 watcher，命中即点击，不提前退出
+        （权限弹窗 6-8s 自动消失，必须检测即点）。"""
         if not self._wd_enabled:
             return False
         try:
@@ -306,7 +479,7 @@ class TestCase:
             try:
                 if not self._wd_enabled:
                     break
-                xml = self.d.dump_hierarchy()
+                xml = self._dump()
                 words = self._dialog_words(self._wd_policy)
                 if any(f'text="{w}"' in xml for w in words):
                     if self.d.watcher.run(PageSource.parse(xml)):
@@ -332,12 +505,17 @@ class TestCase:
             except Exception:
                 self._db_step_id = None
         print(f"\n▶ [{name}]")
+        # 每步开始时自动截图留证（步骤级证据）
+        try:
+            self._auto_screenshot("步骤开始")
+        except Exception:
+            pass
         return self
 
     def record(self, result, detail, rid=None, evidence=True):
         """记录一条断言结果: result ∈ {PASS, FAIL, WARN, INFO, BLOCKED}
         - rid: 关联元素 resource-id，自动附 read_rid 状态（enabled/selected/checked/clickable）
-        - evidence: FAIL/WARN 时自动截屏留证（默认 True）
+        - evidence: 所有结果默认自动截图留证（验证点截图）
         """
         entry = {"result": result, "detail": detail}
         # 状态快照：状态类断言必须记录实际状态值（以 case 为准原则）
@@ -347,32 +525,28 @@ class TestCase:
                 states = {k: v[k] for k in ("enabled", "selected", "checked", "clickable")
                           if k in v}
                 entry["state"] = states        # FAIL/WARN/BLOCKED 自动截屏留证（不打断正常流程）
-        if evidence and result in ("FAIL", "WARN", "BLOCKED"):
+        # 每步结果都自动截图留证：验证点截图 + FAIL/WARN/BLOCKED 必截图
+        # add_to_step=False：验证点截图由 result.evidence 单独展示，不混入步骤级列表
+        if evidence:
             try:
-                self._shot_idx += 1
-                path = os.path.join(self.case_dir,
-                                    f"{self._shot_idx:02d}_证据_{result}.png")
-                subprocess.run(["adb", "exec-out", "screencap", "-p"],
-                               stdout=open(path, "wb"))
-                entry["evidence"] = path
+                entry["evidence"] = self._auto_screenshot(f"结果_{result}", add_to_step=False)
             except Exception:
                 pass
         self._cur_step["results"].append(entry)
-        # 入库（失败不阻塞测试）
+        # 入库（失败不阻塞测试，但不再静默——记录丢失会破坏追溯链）
         if self._db is not None and self._db_step_id is not None:
             try:
                 self._db.add_result(self._db_step_id, result, detail,
                                     state=entry.get("state"),
                                     evidence=entry.get("evidence"))
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"⚠️ [db] 断言结果入库失败: {e}")
         mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
                 "BLOCKED": "⛔"}[result]
         print(f"   {mark} {entry['detail']}")
         if entry.get("state"):
             print(f"   📊 状态 {entry['state']}")
-        if entry.get("evidence"):
-            print(f"   📷 {entry['evidence']}")
+        # 证据路径已由 _auto_screenshot 内部打印，避免重复输出
         return result == "PASS"
 
     def blocked(self, reason):
@@ -388,9 +562,12 @@ class TestCase:
         raise ValueError("需要 rid 或 text")
 
     def tap_rid(self, rid):
+        t0 = time.time()
         self._el(rid=rid).click()
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
+        self._log_action("tap", f"rid={rid}", t0)
+        self._auto_screenshot(f"点击_{rid}")
         return self
 
     def tap_text(self, text, wait=5.0):
@@ -398,8 +575,11 @@ class TestCase:
         for _ in range(int(wait / 0.5)):
             try:
                 if self.d(text=text).click_exists(timeout=0.3):
+                    t0 = time.time()
                     time.sleep(ACTION_DELAY)
                     self._check_dialogs_after_action()
+                    self._log_action("tap", f"text={text}", t0)
+                    self._auto_screenshot(f"点击_{text}")
                     return self
             except Exception:
                 pass
@@ -407,23 +587,52 @@ class TestCase:
         self.record("WARN", f"tap_text 未找到元素: {text!r}")
         return self
 
+    def tap_text_re(self, pattern, timeout=8.0, clickable=None):
+        """按正则点击文字按钮（App 无关；跨 App 通用能力）。
+
+        为什么需要它：系统权限弹窗的按钮文案会随状态变化，精确匹配必然失配。
+        典型是「拒绝」——用户拒绝过一次后，系统再次弹窗时按钮变成
+        「拒绝并不再询问」（见 knowledge/_system.md）。此时 tap_text("拒绝") 永远
+        匹配不上，用例表现为时通时不通。用正则一次覆盖两种形态：
+
+            t.tap_text_re(r"^拒绝(并不再询问)?$")
+            t.tap_text_re(r"^(仅在使用时允许|仅本次使用时允许|全部允许|选择照片|允许)$")
+
+        pattern   : 正则（re.search）
+        timeout   : 轮询等待上限（秒）
+        clickable : True 只点可点击节点；None 不限
+        返回命中的文案；未命中返回 ""（不记 WARN，交由调用方判断）
+        """
+        deadline = time.time() + timeout
+        rx = re.compile(pattern)
+        while time.time() < deadline:
+            xml = self._dump()
+            for n in _parse_nodes(xml):
+                if not n["text"] or not rx.search(n["text"]):
+                    continue
+                if clickable is True and n["clickable"] != "true":
+                    continue
+                b = n.get("bounds_xy")
+                if not b:
+                    continue
+                t0 = time.time()
+                self.tap_xy((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+                self._log_action("tap", f"text_re={pattern} -> {n['text']!r}", t0)
+                self._auto_screenshot(f"点击_{n['text']}")
+                return n["text"]
+            time.sleep(0.4)
+        return ""
+
     def el_bounds(self, rid=None, text=None, desc=None, xpath=None):
         """按 资源id/文字/内容描述/xpath 定位元素，返回 bounds (x1,y1,x2,y2) 或 None"""
-        xml = self.d.dump_hierarchy()
+        xml = self._dump()
         self._run_dialog_watchers(xml)
-        for n in re.findall(r"<node[^>]*>", xml):
-            ok = False
-            if rid and re.search(rf'resource-id="{re.escape(rid)}"', n):
-                ok = True
-            elif text and re.search(rf'text="{re.escape(text)}"', n):
-                ok = True
-            elif desc and re.search(rf'content-desc="{re.escape(desc)}"', n):
-                ok = True
-            if not ok:
-                continue
-            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-            if b:
-                return tuple(map(int, b.groups()))
+        for n in _parse_nodes(xml):
+            ok = (rid and n["rid"] == rid) \
+                or (text and n["text"] == text) \
+                or (desc and n["desc"] == desc)
+            if ok and n["bounds_xy"]:
+                return n["bounds_xy"]
         return None
 
     def tap_el(self, rid=None, text=None, desc=None, xpath=None, wait=5.0):
@@ -431,10 +640,13 @@ class TestCase:
         for _ in range(int(wait / 0.5)):
             b = self.el_bounds(rid=rid, text=text, desc=desc)
             if b:
+                t0 = time.time()
                 x1, y1, x2, y2 = b
                 self.d.click((x1 + x2) // 2, (y1 + y2) // 2)
                 time.sleep(ACTION_DELAY)
                 self._check_dialogs_after_action()
+                self._log_action("tap", f"bounds=({x1},{y1},{x2},{y2})", t0)
+                self._auto_screenshot(f"点击_{rid or text or desc}")
                 return self
             time.sleep(0.5)
         self.record("WARN", f"tap_el 未找到元素: rid={rid} text={text} desc={desc}")
@@ -444,73 +656,152 @@ class TestCase:
         """按 content-desc 点击（图标按钮常用）"""
         return self.tap_el(desc=desc, wait=wait)
 
+    # ── 必需操作（强语义）：找不到元素 = FAIL 并中止用例 ─────────────
+    # tap_* 系列失败只记 WARN（可选步骤用）；链路关键步骤用 require_*，
+    # 防止"元素没找到但后面忘了断言"导致的假通过。
+    def require_tap_text(self, text, wait=8.0, msg=None):
+        """必须点到指定文字的元素；等不到记 FAIL 并抛 CaseAbort 中止用例。"""
+        if not self.wait_text(text, timeout=wait):
+            self.record("FAIL", msg or f"必需元素未出现: text={text!r}，用例中止")
+            raise CaseAbort(f"require_tap_text({text!r}) 超时")
+        return self.tap_text(text, wait=2)
+
+    def require_tap_rid(self, rid, wait=8.0, msg=None):
+        """必须点到指定 resource-id 的元素；等不到记 FAIL 并抛 CaseAbort。"""
+        if not self.wait_rid(rid, timeout=wait):
+            self.record("FAIL", msg or f"必需元素未出现: rid={rid!r}，用例中止")
+            raise CaseAbort(f"require_tap_rid({rid!r}) 超时")
+        return self.tap_rid(rid)
+
+    def require_tap_el(self, rid=None, text=None, desc=None, wait=8.0, msg=None):
+        """必须点到元素（rid/text/desc 任一）；等不到记 FAIL 并抛 CaseAbort。"""
+        deadline = time.time() + wait
+        while True:
+            if self.el_bounds(rid=rid, text=text, desc=desc):
+                return self.tap_el(rid=rid, text=text, desc=desc, wait=2)
+            if time.time() >= deadline:
+                self.record("FAIL", msg
+                            or f"必需元素未出现: rid={rid} text={text} desc={desc}，用例中止")
+                raise CaseAbort(f"require_tap_el({rid or text or desc!r}) 超时")
+            time.sleep(0.5)
+
     def tap_xy(self, x, y):
         """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）"""
+        t0 = time.time()
         self.d.click(x, y)
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
+        self._log_action("tap", f"x={x}, y={y}", t0)
+        self._auto_screenshot(f"点击坐标_{x}_{y}")
         return self
 
     def input_text(self, rid, text):
+        t0 = time.time()
         self._el(rid=rid).click()
         time.sleep(ACTION_DELAY)
         self.d.send_keys(text)
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
+        self._log_action("input", f"rid={rid}, text={text}", t0)
+        self._auto_screenshot(f"输入_{rid}_{text[:10]}")
         return self
 
     def clear_text(self, rid):
+        t0 = time.time()
         self._el(rid=rid).click()
         time.sleep(ACTION_DELAY)
         self.d.clear_text()
         time.sleep(ACTION_DELAY)
+        self._log_action("clear", f"rid={rid}", t0)
+        self._auto_screenshot(f"清空_{rid}")
         return self
 
     def read_rid(self, rid):
-        """读取元素属性字典: text/checked/enabled/selected/clickable/bounds"""
-        xml = self.d.dump_hierarchy()
+        """读取元素属性字典: text/checked/enabled/selected/clickable/bounds
+        （状态值为原始 "true"/"false" 字符串，属性缺失时为 ""）"""
+        xml = self._dump()
         self._run_dialog_watchers(xml)
-        for n in re.findall(r"<node[^>]*>", xml):
-            if re.search(rf'resource-id="{re.escape(rid)}"', n):
-                g = lambda k: (re.search(rf'{k}="([^"]*)"', n) or [None, None])[1] if re.search(rf'{k}="([^"]*)"', n) else None
-                b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-                bounds = tuple(map(int, b.groups())) if b else None
-                return {"text": g("text"), "checked": g("checked"),
-                        "enabled": g("enabled"), "selected": g("selected"),
-                        "clickable": g("clickable"), "bounds": bounds}
+        for n in _parse_nodes(xml):
+            if n["rid"] == rid:
+                return {"text": n["text"], "checked": n["checked"],
+                        "enabled": n["enabled"], "selected": n["selected"],
+                        "clickable": n["clickable"], "bounds": n["bounds_xy"]}
         return None
 
     def first_clickable(self, y_min, y_max):
         """在指定 y 区间找第一个可点击元素中心（按 y 从小到大）"""
-        xml = self.d.dump_hierarchy()
+        xml = self._dump()
         self._run_dialog_watchers(xml)
         cands = []
-        for n in re.findall(r"<node[^>]*>", xml):
-            if 'clickable="true"' not in n:
+        for n in _parse_nodes(xml):
+            if n["clickable"] != "true" or not n["bounds_xy"]:
                 continue
-            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-            if not b:
-                continue
-            x1, y1, x2, y2 = map(int, b.groups())
+            x1, y1, x2, y2 = n["bounds_xy"]
             if y_min <= y1 <= y_max:
                 cands.append(((x1 + x2) // 2, (y1 + y2) // 2, y1))
         cands.sort(key=lambda c: c[2])
         return (cands[0][0], cands[0][1]) if cands else None
 
+    # ── 条件等待（等界面一律用这些，禁止裸 sleep 碰运气）─────────────
+    def wait_rid(self, rid, timeout=10.0, interval=0.5):
+        """轮询等待元素（resource-id）出现。出现返回 True，超时 False。
+        每次轮询都会 dump UI 树并顺带驱动弹窗看门狗。"""
+        deadline = time.time() + timeout
+        while True:
+            if self.el_bounds(rid=rid):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(interval)
+
+    def wait_text(self, text, timeout=10.0, interval=0.5):
+        """轮询等待指定文字出现。出现返回 True，超时 False。"""
+        deadline = time.time() + timeout
+        while True:
+            if self.el_bounds(text=text):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(interval)
+
+    def wait_activity(self, substr, timeout=10.0, interval=0.5):
+        """轮询等待前台 Activity 包含 substr（大小写不敏感）。
+        命中返回完整 Activity 名，超时返回 ""（falsy，可直接当 bool 用）。"""
+        deadline = time.time() + timeout
+        while True:
+            try:
+                act = self.current_activity()
+            except Exception:
+                act = ""
+            if substr.lower() in act.lower():
+                return act
+            if time.time() >= deadline:
+                return ""
+            time.sleep(interval)
+
     # ── 系统级操作（通用前置条件）────────────────────────────────
     def adb_shell(self, *args):
-        """执行 adb shell 命令，返回 stdout"""
-        r = subprocess.run(["adb", "shell", *args],
+        """执行 adb shell 命令（已绑定本用例 serial），返回 stdout"""
+        r = subprocess.run(self._adb("shell", *args),
                            capture_output=True, text=True)
         return r.stdout.strip()
 
-    def pm_clear(self, package, confirm=True):
-        """清空 App 数据，重置到首次使用状态（pm clear）"""
+    def pm_clear(self, package, confirm=False):
+        """清空 App 数据，重置到首次使用状态（pm clear）
+
+        前置条件（环境准备）默认不产生断言，避免污染「共 N 条断言」统计：
+        - 成功：仅记录操作到时间轴，不计为断言
+        - 失败：环境准备未完成，必须暴露为 FAIL（否则测试结果不可信）
+        - confirm=True：恢复旧行为，成功也记一条 PASS 断言
+        """
+        t0 = time.time()
         out = self.adb_shell("pm", "clear", package)
         ok = "Success" in out
-        if confirm:
-            self.record("PASS" if ok else "FAIL",
-                        f"pm clear {package}: {'成功' if ok else '失败 ' + out}")
+        self._log_action("pm_clear", f"package={package}, ok={ok}", t0)
+        if not ok:
+            self.record("FAIL", f"pm clear {package} 失败（环境准备未完成）: {out}")
+        elif confirm:
+            self.record("PASS", f"pm clear {package}: 成功")
         return ok
 
     def force_stop(self, package):
@@ -536,12 +827,16 @@ class TestCase:
 
     def grant_permission(self, package, permission):
         """授予运行时权限"""
-        return self.adb_shell("pm", "grant", package, permission)
+        t0 = time.time()
+        out = self.adb_shell("pm", "grant", package, permission)
+        ok = "Success" in out or " granted" in out
+        self._log_action("grant_permission", f"package={package}, permission={permission}, ok={ok}", t0)
+        return out
 
     def current_activity(self):
-        """当前前台完整 Activity（如 com.zui.calendar/.timetable.display.TimetableActivity）"""
+        """当前前台完整 Activity（如 com.example.app/.ui.MainActivity）"""
         out = subprocess.run(
-            ["adb", "shell", "dumpsys", "activity", "activities"],
+            self._adb("shell", "dumpsys", "activity", "activities"),
             capture_output=True, text=True,
         ).stdout
         m = re.search(r"topResumedActivity=ActivityRecord\{\S* u0 ([\w./]+) ", out)
@@ -549,56 +844,11 @@ class TestCase:
             m = re.search(r"ResumedActivity: ActivityRecord\{\S* u0 ([\w./]+) ", out)
         return m.group(1) if m else "unknown"
 
-    def top_bar_icons(self):
-        """工具栏图标列表 [(cx,cy,desc,class), ...] 按 x 排序。
-        元素化定位：工具栏带 [100,450] 内可点击、无文字的图标元素（日期等有文字项排除）"""
-        xml = self.d.dump_hierarchy()
-        self._run_dialog_watchers(xml)
-        items = []
-        for n in re.findall(r"<node[^>]*>", xml):
-            if 'clickable="true"' not in n:
-                continue
-            b = re.search(r'bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', n)
-            if not b:
-                continue
-            x1, y1, x2, y2 = map(int, b.groups())
-            if not (100 <= y1 <= 450):
-                continue
-            text = re.search(r'text="([^"]*)"', n)
-            if text and text.group(1):
-                continue
-            desc = re.search(r'content-desc="([^"]*)"', n)
-            d = desc.group(1) if desc else ""
-            if "返回" in d or "上一层级" in d or "back" in d.lower():
-                continue   # 排除返回箭头
-            cls = re.search(r'class="([^"]*)"', n)
-            items.append(((x1 + x2) // 2, (y1 + y2) // 2, d,
-                          (cls.group(1) if cls else "").split(".")[-1]))
-        items.sort(key=lambda i: i[0])
-        return items
-
-    def top_rightmost_icon(self):
-        """右上角最右侧图标按钮（元素化：取 top_bar_icons 最右一个）"""
-        icons = self.top_bar_icons()
-        return (icons[-1][0], icons[-1][1]) if icons else None
-
-    def open_more_menu(self, retries=8):
-        """打开右上角'更多'菜单并验证出现'课程表'项。
-        元素定位+重试：等待 App 就绪（工具栏图标出现）+ 抗转场抖动"""
-        for _ in range(retries):
-            icons = self.top_bar_icons()
-            if not icons:
-                time.sleep(1.5)
-                continue
-            self.tap_xy(*icons[-1][:2])
-            time.sleep(1.2)
-            if any("课程表" in x for x in self.screen_text()):
-                return True
-            time.sleep(1)
-        return False
+    # ── App 私有导航辅助一律不放框架：入口长什么样、在哪、点完验证什么，
+    #    都是具体 App 的知识（knowledge/<包名>.md）或 cases/<包名>/_flow.py 的职责。
 
     def _screen_size(self):
-        raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                              capture_output=True).stdout
         return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
 
@@ -617,7 +867,7 @@ class TestCase:
         for _ in range(max_rounds):
             hit = False
             # 1) 先做一次轻量 dump，字符串匹配（微秒级），命中才真正点击
-            xml = self.d.dump_hierarchy()
+            xml = self._dump()
             words = self._dialog_words(policy)
             for w in words:
                 if f'text="{w}"' not in xml:
@@ -674,7 +924,7 @@ class TestCase:
         print("🛡️  弹窗自动点击已停用")
 
     def current_package(self):
-        out = subprocess.run(["adb", "shell", "dumpsys", "activity", "activities"],
+        out = subprocess.run(self._adb("shell", "dumpsys", "activity", "activities"),
                              capture_output=True, text=True).stdout
         m = re.search(r"topResumedActivity=ActivityRecord\{\S* u0 ([\w.]+)/", out)
         return m.group(1) if m else "unknown"
@@ -709,7 +959,7 @@ class TestCase:
     def _region_contrast(self, bounds, scale=3):
         """计算按钮区域内文字与背景的对比度（0-255 差值）"""
         x1, y1, x2, y2 = bounds
-        raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                              capture_output=True).stdout
         from PIL import Image
         img = Image.open(io.BytesIO(raw)).convert("L")
@@ -746,29 +996,61 @@ class TestCase:
         return self._region_contrast(v["bounds"])
 
     # ── 证据与辅助 ──────────────────────────────────────────────────
-    def screenshot(self, label):
+    def _log_action(self, action, detail=None, start=None):
+        """记录一步 UI 操作及耗时。start 为操作开始前 time.time()。"""
+        duration_ms = 0
+        if start:
+            duration_ms = int((time.time() - start) * 1000)
+        if self._cur_step is not None:
+            self._cur_step.setdefault("actions", []).append(
+                {"action": action, "detail": detail, "duration_ms": duration_ms})
+            if self._db is not None and self._db_step_id is not None:
+                try:
+                    self._db.add_step_action(self._db_step_id, action, detail, duration_ms)
+                except Exception:
+                    pass
+        return duration_ms
+
+    def _auto_screenshot(self, label=None, add_to_step=True):
+        """自动截图：操作/验证点统一入口。label 为 None 时用 'auto'。
+        add_to_step=False 用于验证点截图（record 会单独在 result 中展示，
+        不混入步骤级证据列表，避免报告重复）。"""
         self._shot_idx += 1
-        path = os.path.join(self.case_dir, f"{self._shot_idx:02d}_{label}.png")
-        subprocess.run(["adb", "exec-out", "screencap", "-p"],
+        safe = re.sub(r'[\\/:*?"<>|]', "_", label or "auto")
+        path = os.path.join(self.case_dir, f"{self._shot_idx:02d}_{safe}.png")
+        subprocess.run(self._adb("exec-out", "screencap", "-p"),
                        stdout=open(path, "wb"))
-        self._cur_step["evidences"].append(path)
+        if add_to_step and self._cur_step is not None:
+            self._cur_step["evidences"].append(path)
+            # 步骤级操作截图也入库，供 Web UI 展示
+            if self._db is not None and self._db_step_id is not None:
+                try:
+                    self._db.add_step_evidence(self._db_step_id, path)
+                except Exception:
+                    pass
         print(f"   📷 {path}")
+        return path
+
+    def screenshot(self, label):
+        """用户主动截图：与自动截图等价，但允许自定义 label"""
+        t0 = time.time()
+        path = self._auto_screenshot(label, add_to_step=True)
+        self._log_action("screenshot", label, t0)
         return path
 
     def capture_toast(self, wait=1.5, max_lines=3):
         """捕捉 Toast: 读 logcat 最近 Toast 文本"""
-        subprocess.run(["adb", "logcat", "-c"], capture_output=True)
+        subprocess.run(self._adb("logcat", "-c"), capture_output=True)
         time.sleep(wait)
-        out = subprocess.run(["adb", "logcat", "-d", "-s", "Toast"],
+        out = subprocess.run(self._adb("logcat", "-d", "-s", "Toast"),
                              capture_output=True, text=True).stdout
         m = re.findall(r"showToast.*?text=([^\s]+)", out)
         return m[-1] if m else None
 
     def screen_text(self):
-        xml = self.d.dump_hierarchy()
+        xml = self._dump()
         self._run_dialog_watchers(xml)
-        return [m.group(1) for n in re.findall(r"<node[^>]*>", xml)
-                if (m := re.search(r'text="([^"]*)"', n)) and m.group(1)]
+        return [n["text"] for n in _parse_nodes(xml) if n["text"]]
 
     # ── OCR（Canvas 内容读取）────────────────────────────────────────
     def ocr(self, y_min=0, y_max=99999, x_min=0, x_max=99999):
@@ -778,7 +1060,7 @@ class TestCase:
             self._ocr = RapidOCR()
         import numpy as np
         from PIL import Image
-        raw = subprocess.run(["adb", "exec-out", "screencap", "-p"],
+        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                              capture_output=True).stdout
         img = Image.open(io.BytesIO(raw))
         w, h = img.size
@@ -801,23 +1083,159 @@ class TestCase:
                 return (x, y)
         return None
 
+    # ── 探查缓存（批量探查 + 落盘复用）────────────────────────────────
+    # 目的：生成用例阶段，同一页面只探一次；后续直接读缓存文件或 grep，
+    # 避免"每步 dump + 每步试错"把首次生成拖到 20 分钟。
+    # 缓存是纯文本（dump.xml / ocr.json / meta.json），可直接 grep、re 检索。
+    def _probe_dir(self, label):
+        """缓存目录：storage/probes/<包名>/<label>/"""
+        pkg = "unknown"
+        try:
+            pkg = self.d.app_current()["package"] or "unknown"
+        except Exception:
+            pass
+        return os.path.join(PROBE_DIR, pkg, label)
+
+    def cached_dump(self, label, ttl=None, refresh=False):
+        """取 UI 树，优先读缓存。
+        ttl: 缓存有效期（秒），None=永不过期；refresh=True 强制重探。
+        """
+        d = self._probe_dir(label)
+        fp = os.path.join(d, "dump.xml")
+        if not refresh and os.path.isfile(fp):
+            if ttl is None or (time.time() - os.path.getmtime(fp)) < ttl:
+                with open(fp, encoding="utf-8") as f:
+                    return f.read()
+        xml = self._dump()
+        os.makedirs(d, exist_ok=True)
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write(xml)
+        return xml
+
+    def cached_ocr(self, label, y_min=0, y_max=99999, refresh=False):
+        """取 OCR 结果，优先读缓存。返回 [(x, y, conf, text)]。"""
+        import json
+        d = self._probe_dir(label)
+        fp = os.path.join(d, "ocr.json")
+        if not refresh and os.path.isfile(fp):
+            with open(fp, encoding="utf-8") as f:
+                return [(i[0], i[1], i[2], i[3]) for i in json.load(f)]
+        res = self.ocr(y_min, y_max)
+        os.makedirs(d, exist_ok=True)
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(res, f, ensure_ascii=False, indent=1)
+        return res
+
+    def probe_page(self, label, ocr=False, ttl=None, refresh=False):
+        """批量探查当前页：一次拿全 rid / text / bounds / 前台信息。
+
+        返回结构化 dict，供生成用例的 agent 在内存里做匹配与规划，
+        取代"点一步看一步"的单步试错。同时落盘供后续 grep 复用。
+        """
+        xml = self.cached_dump(label, ttl=ttl, refresh=refresh)
+        nodes = [{
+            "rid": n["rid"], "text": n["text"], "desc": n["desc"],
+            "cls": n["cls"], "bounds": n["bounds"], "bounds_xy": n["bounds_xy"],
+            "clickable": n["clickable"] == "true",
+        } for n in _parse_nodes(xml)]
+        try:
+            pkg = self.d.app_current()["package"]
+        except Exception:
+            pkg = None
+        info = {
+            "label": label,
+            "package": pkg,
+            "texts": [n["text"] for n in nodes if n["text"]],
+            "rids": sorted({n["rid"] for n in nodes if n["rid"]}),
+            "nodes": nodes,
+        }
+        if ocr:
+            info["ocr"] = self.cached_ocr(label, refresh=refresh)
+        # meta 落盘，便于检索
+        import json
+        d = self._probe_dir(label)
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+            json.dump({"label": label, "package": pkg,
+                       "ts": datetime.now().isoformat(timespec="seconds"),
+                       "texts": info["texts"], "rids": info["rids"]},
+                      f, ensure_ascii=False, indent=1)
+        return info
+
+    def find_nodes(self, label=None, rid_re=None, text_re=None,
+                   cls_re=None, clickable=None, ttl=None):
+        """在探查结果里按正则筛节点（不连设备时用缓存）。
+        例: find_nodes("某页面", rid_re="switch_")
+        """
+        xml = self.cached_dump(label, ttl=ttl) if label else self._dump()
+        out = []
+        for n in _parse_nodes(xml):
+            d = {"rid": n["rid"], "text": n["text"],
+                 "desc": n["desc"], "cls": n["cls"],
+                 "bounds": n["bounds"], "bounds_xy": n["bounds_xy"],
+                 "clickable": n["clickable"] == "true"}
+            if rid_re and not re.search(rid_re, d["rid"]):
+                continue
+            if text_re and not re.search(text_re, d["text"]):
+                continue
+            if cls_re and not re.search(cls_re, d["cls"]):
+                continue
+            if clickable is not None and d["clickable"] != clickable:
+                continue
+            out.append(d)
+        return out
+
+    def _compute_final_status(self):
+        """用例最终结论（机器可消费的显式语义，不从摘要文本推断）：
+        有 FAIL → FAIL；无 FAIL 有 BLOCKED → BLOCKED；两者皆无但有 WARN → WARN；
+        其余 → PASS。规则确定性，优先级 FAIL > BLOCKED > WARN > PASS。"""
+        counts = self._result_counts()
+        if counts["FAIL"]:
+            return "FAIL"
+        if counts["BLOCKED"]:
+            return "BLOCKED"
+        if counts["WARN"]:
+            return "WARN"
+        return "PASS"
+
+    def _result_counts(self):
+        counts = {"PASS": 0, "FAIL": 0, "WARN": 0, "INFO": 0, "BLOCKED": 0}
+        for s in self.steps:
+            for r in s["results"]:
+                counts[r["result"]] = counts.get(r["result"], 0) + 1
+        return counts
+
     # ── 报告 ────────────────────────────────────────────────────────
     def finish(self):
+        global LAST_CASE
         os.makedirs(REPORT_DIR, exist_ok=True)
         path = os.path.join(REPORT_DIR, f"{self.name}_报告.md")
+        # 正式报告名始终反映最近一次运行（重跑覆盖是既定语义，DB 里另有全量历史）。
+        # 但覆盖前把旧报告备份成带时间戳的副本，杜绝"同名用例互相覆盖导致结果丢失"。
+        if os.path.exists(path):
+            try:
+                import shutil
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                bak = os.path.join(REPORT_DIR, f"{self.name}_{ts}_报告.md")
+                shutil.copyfile(path, bak)
+                print(f"[提示] 旧报告已备份为 {os.path.basename(bak)}", flush=True)
+            except Exception as e:
+                print(f"⚠️ 旧报告备份失败: {e}")
+        counts = self._result_counts()
+        pass_n, fail_n = counts["PASS"], counts["FAIL"]
+        warn_n, blocked_n, info_n = counts["WARN"], counts["BLOCKED"], counts["INFO"]
+        total = pass_n + fail_n          # 仅 PASS/FAIL 计入断言统计
+        self.final_status = self._compute_final_status()
+        LAST_CASE = self                 # run_case.py 取最终结论定退出码
         lines = [f"# 测试报告：{self.name}",
                  f"\n**测试日期**：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                 f"**设备**：{self.d.app_current()['package']}",
+                 f"**设备**：{self.device_info}",
+                 f"**被测 App**：{self.d.app_current().get('package', 'unknown')}",
+                 f"**最终结论**：{self.final_status}",
                  f"**证据目录**：{self.case_dir}\n"]
-        total = pass_n = fail_n = 0
         for s in self.steps:
             lines.append(f"\n## {s['name']}")
             for r in s["results"]:
-                total += 1
-                if r["result"] == "PASS":
-                    pass_n += 1
-                elif r["result"] == "FAIL":
-                    fail_n += 1
                 mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
                         "BLOCKED": "⛔"}[r["result"]]
                 lines.append(f"- {mark} {r['detail']}")
@@ -827,16 +1245,25 @@ class TestCase:
                     lines.append(f"  - 证据: `{r['evidence']}`")
             for ev in s["evidences"]:
                 lines.append(f"  - 证据: `{ev}`")
-        lines.append(f"\n---\n**汇总**: ✅ {pass_n} 通过 / ❌ {fail_n} 失败 / 共 {total} 条断言")
+        duration_sec = 0
+        if self._case_start_time:
+            duration_sec = round(time.time() - self._case_start_time, 1)
+        summary = (f"✅ {pass_n} 通过 / ❌ {fail_n} 失败 / ⚠️ {warn_n} 警告 / "
+                   f"⛔ {blocked_n} 阻塞 / ℹ️ {info_n} 记录 / 共 {total} 条断言")
+        lines.append(f"\n---\n**汇总**: {summary} / 耗时 {duration_sec}s")
+        lines.append(f"**最终结论**: {self.final_status}")
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         print(f"\n📄 报告已生成: {path}")
+        print(f"🏁 最终结论: {self.final_status}（{summary}）")
+        print(f"📊 UI dump 次数: {self._dump_count}")
         # 完成用例记录入库
         if self._db is not None and self._db_case_id is not None:
             try:
                 self._db.finish_case(
-                    self._db_case_id, path,
-                    f"✅ {pass_n} 通过 / ❌ {fail_n} 失败 / 共 {total} 条断言")
-            except Exception:
-                pass
+                    self._db_case_id, path, summary,
+                    final_status=self.final_status)
+            except Exception as e:
+                # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
+                print(f"⚠️ [db] 用例完成状态入库失败: {e}")
         return path

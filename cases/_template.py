@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""用例脚本模板：复制本文件为 cases/你的用例名.py，按下面结构填写。
+"""用例脚本模板：复制本文件为 cases/<包名>/<用例编号>.py，按下面结构填写。
+用例按被测 App 包名分目录（如 cases/com.zui.calendar/175.py），
+与该 App 的知识卡 knowledge/<包名>.md、探查缓存 storage/probes/<包名>/ 同键。
 不会写？直接把用例发给我（AI），我按这个模板帮你转成脚本。
 """
 import os
@@ -7,8 +9,12 @@ import subprocess
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)  # 同目录 _flow.py：本 App 的可复用流程（≥2 用例共享才提取进去）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)), "framework"))
 from test_framework import TestCase
+
+PKG = os.path.basename(_HERE)  # 目录名即包名
 
 
 def run():
@@ -29,6 +35,8 @@ def run():
     # t.tap_rid("com.example:id/btn")      # 按 resource-id 点
     # t.tap_xy(100, 200)                   # 按坐标点（慎用）
     # t.input_text("com.example:id/edit", "中文输入")
+    # 等界面用条件等待，禁止裸 sleep：
+    # t.wait_text("目标文字", timeout=10) / t.wait_rid("com.example:id/x") / t.wait_activity("main")
     # 断言
     # t.assert_text("com.example:id/result", "期望值", "说明")
     # t.assert_switch("com.example:id/switch", "true", "开关打开")

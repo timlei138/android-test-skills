@@ -36,8 +36,8 @@ case "${1:-start}" in
       echo "⚠️  已在运行 (PID $(cat "$PIDFILE"), http://127.0.0.1:${PORT})"
       exit 0
     fi
-    # 显式指定数据目录，保证从任何位置启动都读写同一个库/知识库
-    DSH_ANDROID_TEST_DIR="$TEST_DIR" \
+    # 显式指定数据目录与 skill 包位置，保证从任何位置启动都读写同一份资产
+    DSH_ANDROID_TEST_DIR="$TEST_DIR" DSH_SKILL_DIR="$SKILL_DIR" \
     nohup "$PYTHON" "$WEBUI" --port "$PORT" >"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1.5

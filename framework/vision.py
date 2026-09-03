@@ -13,6 +13,7 @@ import base64
 import io
 import json
 import os
+import ssl
 import urllib.request
 
 MODEL = "deepseek-v4-flash-vision-exp"
@@ -20,11 +21,47 @@ BASE_URL = "https://api.deepseek.com"
 CREDENTIALS_FILE = os.path.join(os.path.expanduser("~"), ".dsh", ".credentials.yaml")
 
 
+# 工作区视觉配置（Web UI「视觉模型」页保存；工作区只存运行产物，不进 skill 包）
+def _workspace_dir() -> str:
+    env = os.environ.get("DSH_ANDROID_TEST_DIR")
+    if env and env.strip():
+        return os.path.abspath(os.path.expanduser(env.strip()))
+    try:
+        from db import default_test_dir
+        return default_test_dir()
+    except Exception:
+        return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+
+
+VISION_CONF_FILE = os.path.join(_workspace_dir(), "storage", "vision.json")
+
+
+def _load_vision_conf() -> dict:
+    """读取工作区视觉配置（base_url / model / api_key）。缺失字段返回空串。"""
+    out = {"base_url": "", "model": "", "api_key": ""}
+    try:
+        with open(VISION_CONF_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            for k in out:
+                out[k] = str(data.get(k) or "").strip()
+    except (OSError, ValueError):
+        pass
+    return out
+
+
 def _load_api_key():
-    """凭据来源：环境变量 > ~/.dsh/.credentials.yaml 的 refs.DEEPSEEK_API_KEY"""
+    """凭据优先级：环境变量 > 工作区 storage/vision.json > ~/.dsh/.credentials.yaml。
+
+    工作区配置是 Web UI「视觉模型」页写入的，跨平台（Windows/Linux/macOS）
+    都落在同一个相对路径下，因此这里不再依赖任何平台特定写法。
+    """
     env = os.environ.get("DEEPSEEK_API_KEY")
     if env:
         return env.strip()
+    conf = _load_vision_conf()
+    if conf["api_key"]:
+        return conf["api_key"]
     try:
         with open(CREDENTIALS_FILE, encoding="utf-8") as f:
             for line in f:
@@ -33,7 +70,9 @@ def _load_api_key():
                     return line.split(":", 1)[1].strip()
     except OSError:
         pass
-    raise RuntimeError("未找到 DEEPSEEK_API_KEY（环境变量或 ~/.dsh/.credentials.yaml）")
+    raise RuntimeError(
+        "未配置视觉模型 API Key。可在 Web UI 左侧「视觉模型」页填写并保存"
+        "（存于工作区 storage/vision.json），或设置环境变量 DEEPSEEK_API_KEY")
 
 
 def _encode_image(image) -> str:
@@ -48,11 +87,37 @@ def _encode_image(image) -> str:
     return "data:image/png;base64," + base64.b64encode(raw).decode()
 
 
+def _is_cert_verify_error(e) -> bool:
+    """urllib.error.URLError 是否为证书校验失败（企业代理/自签证书常见）。"""
+    reason = getattr(e, "reason", e)
+    return isinstance(reason, ssl.SSLCertVerificationError) \
+        or "certificate verify failed" in str(reason).lower()
+
+
+def urlopen_with_ssl_fallback(req, timeout):
+    """默认严格校验证书；CERTIFICATE_VERIFY_FAILED 时自动降级重试一次
+    （跳过校验——典型场景：企业代理 SSL 拦截重签证书）。
+    返回 (response, ssl_skipped)。设环境变量 DSH_SSL_VERIFY=1 可禁止降级。"""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout), False
+    except urllib.error.URLError as e:
+        if not _is_cert_verify_error(e) or os.environ.get("DSH_SSL_VERIFY") == "1":
+            raise
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        print("⚠️ [vision] SSL 证书校验失败，已跳过校验重试"
+              "（疑似企业代理拦截；设 DSH_SSL_VERIFY=1 可禁用此降级）")
+        return urllib.request.urlopen(req, timeout=timeout, context=ctx), True
+
+
 class Vision:
-    def __init__(self, api_key=None, model=MODEL, base_url=BASE_URL, timeout=90):
+    def __init__(self, api_key=None, model=None, base_url=None, timeout=90):
+        # 未显式传入时，model / base_url 取工作区配置，否则回落到内置默认
+        conf = _load_vision_conf()
         self.api_key = api_key or _load_api_key()
-        self.model = model
-        self.base_url = base_url
+        self.model = model or conf["model"] or MODEL
+        self.base_url = (base_url or conf["base_url"] or BASE_URL).rstrip("/")
         self.timeout = timeout
 
     def ask(self, prompt: str, image, max_tokens=1024) -> str:
@@ -92,9 +157,9 @@ class Vision:
             f"{self.base_url}/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json",
-                     "Authorization": f"Bearer {self.api_key}"})
+                     "Authorization": "Bearer " + self.api_key})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urlopen_with_ssl_fallback(req, self.timeout)[0] as r:
                 resp = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"视觉 API HTTP {e.code}: {e.read().decode()[:300]}")

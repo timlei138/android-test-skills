@@ -3,3 +3,7 @@ __pycache__/
 .DS_Store
 *.log
 .webui.pid
+# 工作区运行产物（含密钥，绝不入库）
+storage/
+# 视觉模型凭据（明文 api_key，双重保险）
+storage/vision.json

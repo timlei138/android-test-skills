@@ -1,229 +1,223 @@
 <!DOCTYPE html>
-<html lang="zh">
+<html lang="zh" class="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Android 测试台</title>
-<style>
-  :root { --bg:#0f172a; --panel:#1e293b; --panel2:#273449; --line:#334155;
-          --text:#e2e8f0; --muted:#94a3b8; --accent:#2563eb; }
-  * { box-sizing: border-box; }
-  body { font: 14px/1.55 system-ui, -apple-system, sans-serif; margin:0;
-         background:var(--bg); color:var(--text); }
-  .app { display:flex; min-height:100vh; }
-  .side { width:200px; background:var(--panel); border-right:1px solid var(--line);
-          padding:16px 10px; flex-shrink:0; }
-  .side h1 { font-size:15px; margin:0 6px 18px; }
-  .side button { display:block; width:100%; text-align:left; padding:10px 12px; margin:2px 0;
-                 background:transparent; border:0; border-radius:8px; color:var(--muted);
-                 font-size:13.5px; cursor:pointer; }
-  .side button:hover { background:var(--panel2); color:var(--text); }
-  .side button.active { background:var(--accent); color:#fff; }
-  .side .hint { font-size:11px; color:var(--muted); margin:14px 8px 4px; }
-  .main { flex:1; padding:20px 26px; max-width:1000px; }
-  .main h2 { font-size:16px; margin:0 0 14px; }
-  .case { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-          padding:12px 16px; margin-bottom:10px; cursor:pointer; }
-  .case:hover { border-color:var(--accent); }
-  .case .top { display:flex; align-items:center; gap:10px; }
-  .case .name { font-weight:600; }
-  .case .time { color:var(--muted); font-size:12px; margin-left:auto; }
-  .case .summary { color:var(--muted); font-size:12.5px; margin-top:4px; }
-  .badge { display:inline-block; padding:1px 9px; border-radius:999px; font-size:11.5px;
-           font-weight:600; }
-  .b-PASS { background:#052e16; color:#4ade80; }
-  .b-FAIL { background:#450a0a; color:#f87171; }
-  .b-WARN { background:#451a03; color:#fbbf24; }
-  .b-INFO { background:#0c4a6e; color:#38bdf8; }
-  .b-BLOCKED { background:#3b0764; color:#c084fc; }
-  .detail { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-            padding:16px 18px; }
-  .back { background:none; border:0; color:var(--accent); cursor:pointer; padding:0 0 10px; }
-  .step { margin:14px 0; }
-  .step h3 { font-size:13.5px; color:#93c5fd; margin:0 0 6px; }
-  .res { margin:4px 0; padding:6px 10px; background:var(--panel2); border-radius:6px;
-         font-size:13px; }
-  .res .det { margin-top:3px; }
-  .res .st { color:var(--muted); font-size:12px; }
-  .res .ev { color:#4ade80; font-size:12px; word-break:break-all; margin-top:2px; }
-  .ev-link { color:#4ade80; text-decoration:underline; cursor:pointer; }
-  .kb { display:flex; gap:14px; align-items:stretch; }
-  .kb-list { width:230px; flex-shrink:0; background:var(--panel); border:1px solid var(--line);
-             border-radius:10px; padding:10px; max-height:70vh; overflow:auto; }
-  .kb-list button { display:block; width:100%; text-align:left; padding:8px 10px; margin:2px 0;
-                    background:transparent; border:0; border-radius:6px; color:var(--text);
-                    font-size:12.5px; cursor:pointer; }
-  .kb-list button:hover { background:var(--panel2); }
-  .kb-list button.active { background:var(--accent); }
-  .kb-edit { flex:1; display:flex; flex-direction:column; gap:10px; }
-  .kb-edit textarea { width:100%; height:60vh; background:#0b1220; color:var(--text);
-                      border:1px solid var(--line); border-radius:8px; padding:12px;
-                      font:12.5px/1.6 ui-monospace, SFMono-Regular, monospace; resize:vertical; }
-  .kb-toolbar { display:flex; gap:8px; align-items:center; }
-  .btn { background:var(--accent); color:#fff; border:0; padding:7px 16px; border-radius:7px;
-         cursor:pointer; font-size:13px; }
-  .btn.secondary { background:var(--panel2); color:var(--text); }
-  .saved { color:#4ade80; font-size:12.5px; }
-  .empty { color:var(--muted); padding:20px; text-align:center; }
-  .toolbar { display:flex; gap:8px; margin-bottom:14px; }
-  .search { background:var(--panel); border:1px solid var(--line); color:var(--text);
-            border-radius:7px; padding:7px 12px; font-size:13px; flex:1; }
-  .fbtn { background:var(--panel); border:1px solid var(--line); color:var(--muted);
-          border-radius:7px; padding:6px 12px; cursor:pointer; font-size:12.5px; }
-  .fbtn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
-</style>
-</head>
-<body>
-<div class="app">
-  <nav class="side">
-    <h1>🤖 Android 测试台</h1>
-    <button id="nav-records" class="active" onclick="show('records')">📋 测试记录</button>
-    <button id="nav-knowledge" onclick="show('knowledge')">📚 知识库</button>
-    <div class="hint">记录存 SQLite · 知识库存 YAML</div>
-  </nav>
+<title>Android 测试台 · Test Lab</title>
+<!-- 等宽字体改为本地字体栈：不依赖 Google Fonts，离线可用。
+     原先走 fonts.googleapis.com，无外网时 JetBrains Mono 取不到，
+     编辑器会退化成默认字体，且首屏要等网络超时。 -->
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/webui.css">
 
-  <main class="main" id="view-records">
-    <h2>测试记录</h2>
-    <div class="toolbar">
-      <input class="search" id="case-search" placeholder="搜索用例名…" oninput="renderCases()">
-      <button class="fbtn active" id="flt-all" onclick="setFilter('')">全部</button>
-      <button class="fbtn" id="flt-PASS" onclick="setFilter('PASS')">通过</button>
-      <button class="fbtn" id="flt-FAIL" onclick="setFilter('FAIL')">失败</button>
+</head>
+<body class="light">
+<div class="app">
+  <aside class="side">
+    <div class="brand">
+      <div class="logo">AT</div>
+      <div><div class="brand-title">Android 测试台</div><div class="brand-sub">Test Lab</div></div>
     </div>
-    <div id="case-list"></div>
-    <div id="case-detail"></div>
+    <nav>
+      <button id="nav-records" class="active" onclick="show('records')"><span class="nav-icon">◈</span><span>测试记录</span></button>
+      <button id="nav-scripts" onclick="show('scripts')"><span class="nav-icon">▤</span><span>Case</span></button>
+      <button id="nav-knowledge" onclick="show('knowledge')"><span class="nav-icon">◉</span><span>知识库</span></button>
+      <button id="nav-vision" onclick="show('vision')"><span class="nav-icon">👁</span><span>视觉模型</span></button>
+    </nav>
+    <div class="side-footer">SQLite · Markdown</div>
+  </aside>
+
+  <main id="view-records">
+    <div class="page-header">
+      <div>
+        <h2>测试记录</h2>
+        <p>用例执行历史、报告与截图证据</p>
+      </div>
+      <button class="theme-toggle" onclick="toggleTheme()">🌙 暗色</button>
+    </div>
+
+    <div class="filter-bar">
+      <button class="filter-btn active" id="flt-all" onclick="setFilter('')">
+        <span>全部</span><b id="stat-total">0</b>
+      </button>
+      <button class="filter-btn" id="flt-PASS" onclick="setFilter('PASS')">
+        <span style="color:var(--pass)">●</span><span>成功</span><b id="stat-pass">0</b>
+      </button>
+      <button class="filter-btn" id="flt-FAIL" onclick="setFilter('FAIL')">
+        <span style="color:var(--fail)">●</span><span>失败</span><b id="stat-fail">0</b>
+      </button>
+      <input class="search" id="case-search" placeholder="搜索用例名…" oninput="renderCases()">
+      <button class="filter-btn" id="btn-batch-del" style="display:none;color:var(--fail);border-color:var(--fail)"
+              onclick="deleteSelectedCases()">删除所选 <b id="sel-count">0</b></button>
+      <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap">
+        <input type="checkbox" id="sel-all" onchange="toggleSelectAll(this.checked)"> 全选
+      </label>
+    </div>
+
+    <div class="case-table-wrap">
+      <table class="case-table">
+        <thead>
+          <tr>
+            <th style="width:34px"><input type="checkbox" id="sel-all-head" onchange="toggleSelectAll(this.checked)"></th>
+            <th>ID</th>
+            <th>用例名</th>
+            <th>测试类别</th>
+            <th>状态</th>
+            <th>总耗时</th>
+            <th>Case 输入</th>
+            <th style="width:70px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="case-list"></tbody>
+      </table>
+      <div id="empty-state" class="empty" style="display:none">暂无记录</div>
+    </div>
   </main>
 
-  <main class="main" id="view-knowledge" style="display:none">
-    <h2>知识库（按前台包名注入 App 操作经验）</h2>
-    <div class="kb">
-      <div class="kb-list" id="kb-files"></div>
+  <main id="view-scripts" style="display:none">
+    <div class="page-header">
+      <div><h2>Case 用例</h2><p>测试用例脚本，点击行查看编辑，可删除</p></div>
+      <button class="theme-toggle" onclick="toggleTheme()">🌙 暗色</button>
+    </div>
+
+    <div class="filter-bar">
+      <input class="search" id="script-search" placeholder="搜索用例名或描述…" oninput="renderScripts()">
+      <button class="filter-btn" onclick="newScript()">＋ 新建用例</button>
+    </div>
+
+    <div class="case-table-wrap">
+      <table class="case-table">
+        <thead>
+          <tr>
+            <th>用例名</th>
+            <th>描述 / 原始输入</th>
+            <th style="width:60px">步骤</th>
+            <th style="width:130px">修改时间</th>
+            <th style="width:60px">操作</th>
+          </tr>
+        </thead>
+        <tbody id="script-list"></tbody>
+      </table>
+      <div id="script-empty" class="empty" style="display:none">暂无用例</div>
+    </div>
+  </main>
+
+  <main id="view-knowledge" style="display:none">
+    <div class="page-header">
+      <div><h2>知识库</h2><p>按前台包名注入 App 操作经验，支持查看和编辑 Markdown</p></div>
+      <button class="theme-toggle" onclick="toggleTheme()">🌙 暗色</button>
+    </div>
+    <div class="kb-layout">
+      <div class="kb-list">
+        <div class="kb-list-header">知识卡 <span style="font-weight:400;color:var(--text-3)">按包名</span></div>
+        <div class="kb-files" id="kb-files"></div>
+      </div>
       <div class="kb-edit">
         <div class="kb-toolbar">
-          <button class="btn" onclick="saveKnowledge()">💾 保存</button>
-          <button class="btn secondary" onclick="newKnowledge()">＋ 新建</button>
+          <button class="btn" id="kb-save" onclick="saveKnowledge()">💾 保存</button>
+          <button class="btn secondary" onclick="newKnowledge()">＋ 新建知识卡</button>
+          <button class="btn danger" id="kb-del" onclick="deleteKnowledge(kbCurrent)">🗑 删除</button>
           <span class="saved" id="kb-saved"></span>
         </div>
-        <textarea id="kb-editor" placeholder="选择左侧知识卡，或点「新建」创建…"></textarea>
+        <div class="kb-error" id="kb-error" style="display:none"></div>
+        <div class="kb-tip" id="kb-protected-tip" style="display:none">
+          内置卡为只读：它是新建知识卡的样式来源 / 通用兜底卡，不可修改或删除。
+        </div>
+        <div class="kb-editor-wrap" id="kb-editor-wrap">
+          <div class="kb-cm-host" id="kb-editor">
+            <!-- CodeMirror 挂载点（知识卡源码：高亮 / 行号 / 括号匹配 / 缩进） -->
+          </div>
+          <!-- CodeMirror 未就绪时的降级 textarea -->
+          <textarea id="kb-editor-raw" class="kb-editor" spellcheck="false" style="display:none"></textarea>
+          <div class="kb-empty" id="kb-empty">选择左侧知识卡开始编辑</div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <main id="view-vision" style="display:none">
+    <div class="page-header">
+      <div><h2>视觉模型</h2><p>配置视觉断言所用的模型；凭据保存在工作区，不会随 skill 包分享</p></div>
+      <button class="theme-toggle" onclick="toggleTheme()">🌙 暗色</button>
+    </div>
+
+    <div class="vision-wrap">
+      <div class="vision-card">
+        <div class="vision-row">
+          <label for="v-base">Base URL</label>
+          <input id="v-base" class="vision-input" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false">
+          <div class="vision-hint">OpenAI 兼容端点，留空用内置默认</div>
+        </div>
+        <div class="vision-row">
+          <label for="v-model">Model</label>
+          <input id="v-model" class="vision-input" placeholder="deepseek-v4-flash-vision-exp" autocomplete="off" spellcheck="false">
+          <div class="vision-hint">需支持图片输入（vision）</div>
+        </div>
+        <div class="vision-row">
+          <label for="v-key">API Key</label>
+          <input id="v-key" class="vision-input" type="password" placeholder="留空则保持已保存的密钥不变" autocomplete="new-password" spellcheck="false">
+          <div class="vision-hint" id="v-key-hint">尚未配置</div>
+        </div>
+
+        <div class="vision-actions">
+          <button class="btn" onclick="saveVision()">💾 保存</button>
+          <button class="btn secondary" onclick="testVision()">🔌 测试连接</button>
+          <span class="saved" id="v-saved"></span>
+        </div>
+
+        <div class="vision-status" id="v-status"></div>
+
+        <div class="vision-meta">
+          <div>配置路径：<code id="v-path">-</code></div>
+          <div class="vision-tip">
+            凭据写入工作区 <code>storage/vision.json</code>（权限 600）。
+            <code>sync_skill.ps1</code> 不同步 <code>storage/</code>，因此分享 skill 包不会泄露密钥。
+            运行时优先级：环境变量 <code>DEEPSEEK_API_KEY</code> &gt; 本页配置 &gt; <code>~/.dsh/.credentials.yaml</code>。
+          </div>
+        </div>
       </div>
     </div>
   </main>
 </div>
-<script>
-const $ = s => document.querySelector(s);
-let cases = null, filter = '', kbCurrent = null, kbFiles = [];
-const api = async (p, o) => { const r = await fetch(p, o); if (!r.ok) throw new Error((await r.text()).slice(0,150)); return r.json(); };
-function show(name) {
-  $('#view-records').style.display = name==='records' ? '' : 'none';
-  $('#view-knowledge').style.display = name==='knowledge' ? '' : 'none';
-  $('#nav-records').className = name==='records' ? 'active' : '';
-  $('#nav-knowledge').className = name==='knowledge' ? 'active' : '';
-  if (name==='knowledge' && !kbFiles.length) loadKnowledgeList();
-}
-function badge(r) { return '<span class="badge b-'+r+'">'+r+'</span>'; }
 
-// ── 测试记录 ──
-async function loadCases() {
-  try { cases = await api('/api/cases'); renderCases(); }
-  catch(e) { $('#case-list').innerHTML = '<div class="empty">加载失败: '+e.message+'</div>'; }
-}
-function setFilter(f) {
-  filter = f;
-  ['all','PASS','FAIL'].forEach(k => $('#flt-'+k).className = 'fbtn' + (k===(f||'all')?' active':''));
-  renderCases();
-}
-function renderCases() {
-  const q = ($('#case-search').value||'').toLowerCase();
-  const list = (cases||[]).filter(c =>
-    (!filter || (c.summary||'').includes(filter)) &&
-    (!q || c.name.toLowerCase().includes(q)));
-  const el = $('#case-list');
-  if (!list.length) { el.innerHTML = '<div class="empty">暂无记录</div>'; return; }
-  el.innerHTML = list.map(c => {
-    const fail = (c.summary||'').match(/(\d+) 失败/);
-    const pass = (c.summary||'').match(/(\d+) 通过/);
-    const b = fail && +fail[1]>0 ? badge('FAIL') : badge('PASS');
-    return '<div class="case" onclick="openCase('+c.id+')">' +
-      '<div class="top">'+b+'<span class="name">'+c.name+'</span>' +
-      '<span class="time">'+(c.started_at||'').replace('T',' ')+'</span></div>' +
-      '<div class="summary">'+ (c.summary||'') + (c.device? ' · '+c.device : '') +'</div></div>';
-  }).join('');
-}
-async function openCase(id) {
-  const c = await api('/api/cases/'+id);
-  let html = '<button class="back" onclick="closeDetail()">‹ 返回列表</button><div class="detail">' +
-    '<h2 style="margin-bottom:4px">'+c.name+'</h2>' +
-    '<div class="summary" style="margin-bottom:12px">'+ (c.summary||'') +'</div>';
-  if (c.user_input) html += '<div class="res" style="margin-bottom:10px"><div class="det" style="color:#93c5fd">📝 用户输入用例：</div><div class="st">'+c.user_input+'</div></div>';
-  if (c.script_path) html += '<div class="res" style="margin-bottom:10px"><div class="det" style="color:#93c5fd">📄 用例脚本：</div><div class="st">'+c.script_path+'</div></div>';
-  for (const s of c.steps) {
-    html += '<div class="step"><h3>'+s.name+'</h3>';
-    for (const r of s.results) {
-      html += '<div class="res">'+badge(r.result)+'<div class="det">'+r.detail+'</div>';
-      if (r.state) html += '<div class="st">状态 '+JSON.stringify(r.state)+'</div>';
-      if (r.evidence) html += '<div class="ev">📷 <span class="ev-link" data-ev="'+encodeURIComponent(r.evidence)+'">'+r.evidence+'</span></div>';
-      html += '</div>';
-    }
-    html += '</div>';
-  }
-  html += '</div>';
-  $('#case-list').style.display = 'none';
-  $('#case-detail').innerHTML = html;
-  $('#case-detail').style.display = '';
-}
-function closeDetail() {
-  $('#case-detail').innerHTML = '';
-  $('#case-detail').style.display = 'none';
-  $('#case-list').style.display = '';
-}
-document.addEventListener('click', function(e) {
-  var t = e.target.closest ? e.target.closest('.ev-link') : null;
-  if (t && t.dataset.ev) window.open('/api/file?path='+t.dataset.ev, '_blank');
-});
+<div class="overlay" id="detail-overlay" onclick="closeDetail()"></div>
+<div class="detail-panel" id="detail-panel">
+  <div class="detail-head">
+    <button class="btn-icon" onclick="closeDetail()" title="返回">←</button>
+    <h2 id="detail-title">用例详情</h2>
+    <button class="btn-delete" onclick="deleteCase(currentCaseId)">🗑️ 删除</button>
+  </div>
+  <div class="detail-scroll" id="detail-body"></div>
+</div>
 
-// ── 知识库 ──
-async function loadKnowledgeList() {
-  try {
-    kbFiles = await api('/api/knowledge');
-    const el = $('#kb-files'); el.innerHTML = '';
-    kbFiles.forEach(f => {
-      const b = document.createElement('button');
-      b.textContent = f;
-      b.className = f===kbCurrent ? 'active' : '';
-      b.onclick = () => loadKnowledge(f);
-      el.appendChild(b);
-    });
-    if (kbFiles.length && !kbCurrent) loadKnowledge(kbFiles[0]);
-    else if (!kbFiles.length) $('#kb-editor').value = '';
-  } catch(e) { $('#kb-files').innerHTML = '<div class="empty">'+e.message+'</div>'; }
-}
-async function loadKnowledge(name) {
-  kbCurrent = name;
-  document.querySelectorAll('#kb-files button').forEach(b => b.className = b.textContent===name?'active':'');
-  const r = await fetch('/api/knowledge/'+encodeURIComponent(name));
-  $('#kb-editor').value = await r.text();
-}
-async function saveKnowledge() {
-  if (!kbCurrent) { alert('先选择或新建一个知识卡'); return; }
-  await api('/api/knowledge/'+encodeURIComponent(kbCurrent), {
-    method:'PUT', headers:{'Content-Type':'text/plain'}, body: $('#kb-editor').value });
-  const t = $('#kb-saved'); t.textContent = '✓ 已保存 '+kbCurrent;
-  setTimeout(function(){ t.textContent=''; }, 2000);
-}
-function newKnowledge() {
-  const name = prompt('知识卡文件名（如 com.example.app.yaml）:');
-  if (!name) return;
-  const full = name.endsWith('.yaml')||name.endsWith('.yml') ? name : name+'.yaml';
-  kbFiles.push(full); kbFiles.sort();
-  const b = document.createElement('button');
-  b.textContent = full; b.onclick = () => loadKnowledge(full);
-  $('#kb-files').appendChild(b);
-  const base = full.replace(/\.(yaml|yml)$/,'');
-  const tmpl = '# '+base+' 知识卡\nname: '+base+'\napp: '+base+'\ndescription: \n';
-  loadKnowledge(full);
-  $('#kb-editor').value = tmpl;
-}
-loadCases();
-</script>
+<div class="overlay" id="script-overlay" onclick="closeScript()"></div>
+<div class="detail-panel" id="script-panel">
+  <div class="detail-head">
+    <button class="btn-icon" onclick="closeScript()" title="返回">←</button>
+    <h2 id="script-title">用例详情</h2>
+    <button class="btn-delete" onclick="deleteScript(currentScriptName)">🗑️ 删除</button>
+  </div>
+  <div class="detail-scroll">
+    <div class="detail-meta" id="script-meta"></div>
+    <div class="gallery-label">用例源码（可编辑）</div>
+    <textarea id="script-editor" class="kb-editor" spellcheck="false" style="height:calc(100vh - 340px);border:1px solid var(--line);border-radius:8px;"></textarea>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center">
+      <button class="btn" onclick="saveScript()">💾 保存</button>
+      <span id="script-saved" style="color:var(--pass);font-size:12px"></span>
+    </div>
+  </div>
+</div>
+
+
+
+<div class="lightbox" id="lightbox" onclick="closeLightbox()">
+  <div class="lightbox-close">×</div>
+  <img id="lightbox-img" src="" alt="">
+</div>
+
+<!-- CodeMirror 本地 bundle（离线可用，非 CDN）→ 暴露 window.CodeMirrorYaml（历史命名） -->
+<script src="/codemirror.bundle.js"></script>
+<!-- 前端逻辑（依赖上面的 bundle）-->
+<script src="/webui.js"></script>
 </body>
 </html>

@@ -8,13 +8,13 @@ Android 设备黑盒 GUI 测试技能包：**你给测试用例，它驱动设�
 # 1. 装环境（自动建 venv、装依赖、初始化设备端）
 bash setup.sh
 
-# 2. 跑示例用例（用例在 ~/dsh-android-test/cases/，与 framework 平级）
+# 2. 跑示例用例（用例在本 skill 包 cases/<包名>/ 下，随版本同步）
 cd ~/dsh-android-test/framework
-~/dsh-android-test/.venv/bin/python run_case.py 联想日历_174.py
-# → 自动生成 screenshots/reports/联想日历_174_报告.md
+~/dsh-android-test/.venv/bin/python run_case.py com.zui.calendar/172.py
+# → 自动生成 storage/reports/联想日历_172_报告.md
 
-# 3. 写自己的用例（参考 cases/ 示例）
-#    新建 cases/我的用例.py，用框架 API 表达步骤+断言，然后 run_case.py 执行
+# 3. 写自己的用例（参考 cases/com.zui.calendar/ 示例）
+#    新建 cases/<包名>/<编号>.py，用框架 API 表达步骤+断言，然后 run_case.py 执行
 ```
 
 ## 能力
@@ -35,16 +35,21 @@ cd ~/dsh-android-test/framework
 
 ```
 android-gui-testing/
-├── SKILL.md          # 给 AI 的玩法说明书
-├── README.md         # 本文件
-├── setup.sh          # 一键环境安装
+├── SKILL.md          # 给 AI 的玩法说明书（Agent 操作契约）
+├── README.md         # 本文件（人类快速开始）
+├── setup.sh / setup.ps1        # 一键环境安装（macOS/Linux / Windows）
+├── run_case.ps1 / webui.*      # Windows 执行器 / Web 测试台
 ├── framework/
-│   ├── test_framework.py   # 测试框架
-│   ├── run_case.py         # 用例执行器
-│   ├── knowledge/          # App 知识卡（YAML）
+│   ├── test_framework.py   # 测试框架（元素/OCR/视觉/看门狗/报告）
+│   ├── run_case.py         # 用例执行器（退出码反映最终结论）
+│   ├── states.py           # 状态检测（场景卡自动注册）
+│   ├── db.py               # SQLite 测试记录
+│   ├── vision.py           # 视觉模型通道
 │   ├── ocr_screen.py       # Canvas OCR 辅助
-│   └── set_time_tap.py     # 滚轮点按控制器
-└── cases/            # 示例用例
+│   └── webui.py/.html/.js/.css  # Web 测试台
+├── knowledge/        # App 知识卡（Markdown，按包名）+ scenarios/ 场景卡
+├── cases/            # 用例（按被测 App 包名分目录，如 cases/com.zui.calendar/172.py）
+└── tests/            # framework 纯逻辑单测（无需设备）
 ```
 
 ## 写用例模板
@@ -71,22 +76,24 @@ def run():
 AI 会自动写进知识卡 / 生成用例脚本。
 
 **方式 B（技术用户）**：复制模板改
-- `framework/knowledge/_template.yaml` → 新 App 知识卡
+- `knowledge/_template.md` → 新 App 知识卡
 - `cases/_template.py` → 新用例脚本
 
 ## 给 App 积累知识卡
 
-用户口述的 App 操作经验记录到 `framework/knowledge/<包名>.yaml`：
-```yaml
-app: com.zui.calendar
-导航入口:
-  课程表: 主页 → 右上角"更多" → 弹窗"课程表"
-已知坑:
-  - Canvas 滚轮滑动会过冲，点按数字更准
+用户口述的 App 操作经验记录到 `knowledge/<包名>.md`（Markdown，自由格式）：
+```markdown
+- **app**: com.zui.calendar
+
+## 导航入口
+- 课程表: 主页 → 右上角"更多" → 弹窗"课程表"
+
+## 高效操作
+- Canvas 滚轮滑动会过冲，点按数字更准
 ```
 
 ## 环境要求
 
-- 电脑：macOS/Linux + Python 3.9+ + Android SDK platform-tools (adb)
+- 电脑：macOS/Linux + Python 3.10+ + Android SDK platform-tools (adb)
 - 设备：Android 手机/平板，开启 USB 调试并授权
 - 可选：Python 3.13 + AutoGLM 云端模型（`setup.sh --with-agent`）
