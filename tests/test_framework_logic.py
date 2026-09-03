@@ -474,5 +474,51 @@ class TestRequireTap(unittest.TestCase):
         self.assertTrue(any(r["result"] == "FAIL" for r in results))
 
 
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestRecordAutoStep(unittest.TestCase):
+    """record() 在未开 step 时自动补一个可追溯步骤，而不是崩在 NoneType。
+
+    回归保护：框架 record() 曾直接解引用 _cur_step，调用方忘了 t.step() 就抛
+    TypeError: 'NoneType' object is not subscriptable —— 报错完全看不出根因是
+    没开 step（175 用例踩到，排查成本很高）。
+    """
+
+    def _mk(self):
+        t = object.__new__(tf.TestCase)
+        t._cur_step = None              # 关键前提：从未开过 step
+        t.steps = []
+        t._db = None
+        t._db_step_id = None
+        t._db_step_ord = 0
+        t._wd_enabled = False
+        t._shot_idx = 0
+        t.case_dir = tempfile.mkdtemp()
+        return t
+
+    def test_record_without_step_auto_creates(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.record("PASS", "无 step 直接记录")      # 不该抛异常
+        self.assertEqual(len(t.steps), 1)
+        self.assertIn("未显式声明", t.steps[0]["name"])
+        self.assertEqual(t.steps[0]["results"][0]["detail"], "无 step 直接记录")
+
+    def test_blocked_without_step_auto_creates(self):
+        t = self._mk()                                 # blocked() 走 record，同样受保护
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.blocked("环境不满足")
+        self.assertEqual(len(t.steps), 1)
+        self.assertIn("阻塞", t.steps[0]["results"][0]["detail"])
+
+    def test_existing_step_not_overridden(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()):
+            t.step("我的步骤")
+            t.record("PASS", "正常记录")
+        # 已开过 step 时不能另起一个，结果必须落在原步骤里
+        self.assertEqual(len(t.steps), 1)
+        self.assertEqual(t.steps[0]["name"], "我的步骤")
+
+
 if __name__ == "__main__":
     unittest.main()

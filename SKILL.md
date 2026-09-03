@@ -115,6 +115,39 @@ t.current_package() / t.current_activity()  # 前台包名/完整 Activity
 t.finish() -> 报告路径
 ```
 
+## 新页面探查与用例生成（SOP，2026-09-03 会话验证）
+
+新 App / 新页面首条用例**不要"写完直接真机跑"**（30 分钟起步的老路：探查往返 + 写错断言整链路返工）。
+按下面四步走，真机只占 1-3 分钟，断言错误在真机前就被本地缓存拦截。
+
+### ① 真机只做采集（导航骨架）
+复制 `cases/_lib/_collect_template.py` 当骨架：
+- 已知导航直接复用 `cases/<包名>/_flow.py` 的 goto_*；全新 App 无 _flow 时用
+  `t.d.app_start("包名")` 冷启动 + 首页 `probe_page` 起步（模板已含）
+- 未知下钻"一轮一跳"：`t.probe_page("页面标签")` 落盘 → 看打印摘要定下一跳 → 脚本追加一跳再跑
+- 脚本开头 `t.set_trace()`：全程 dump 快照 + events 落盘 `storage/traces/<用例>/<会话>/`
+  （events 定位"卡在哪个动作"，index/dump 快照看"当时页面状态"，probes 缺料可回头补解析）
+- 每轮真机 ≈2-5s；探 5 页 ≈1-3 分钟
+
+### ② 离线生成页面库存（零真机）
+```
+python cases/_lib/inventory.py <包名> inventory [label…]
+```
+把探查缓存摊开成"这一页有什么料"：可交互项 / 可断言 rid（带当前值）/ 结构文本 / 是否含 OCR 缓存。
+**写断言前先看库存，别猜节点结构。**
+
+### ③ 逐句离线预检（写断言前必做）
+```
+python cases/_lib/inventory.py <包名> verify <label> --rids tv_x --texts "按钮文案" --re '正则'
+```
+每句断言/定位先在缓存上查命中；0 命中即拦截（exit 2）——"写错正则/文案，真机白跑一轮 FAIL"从此不可能。
+典型坑：节次"第1节"与时段"08:00-08:30"是**两个独立节点**（rid=tv_slot_number / tv_time_range），
+同节点匹配"第…节"与"-"永远失败（175 曾因此误报 FAIL）。
+
+### ④ 真机终验一次
+动态行为（跳转/动画/权限时序/Canvas 内容）缓存里没有，合成用例后真机跑一遍收尾。
+跑通用例失败重跑可让 goto 链跳过前置（见 _flow 的 skip_if_ready）。结束回写 knowledge/<包名>.md，删采集脚本。
+
 ## 系统级操作与通用前置条件
 
 跨 App 通用的设备操作（用例前置条件常用）：

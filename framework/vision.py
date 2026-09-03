@@ -120,16 +120,18 @@ class Vision:
         self.base_url = (base_url or conf["base_url"] or BASE_URL).rstrip("/")
         self.timeout = timeout
 
-    def ask(self, prompt: str, image, max_tokens=1024) -> str:
-        """通用视觉问答：prompt + 一张截图 → 文本结论。"""
+    def ask(self, prompt: str, image, max_tokens=1024, timeout=None) -> str:
+        """通用视觉问答：prompt + 一张截图 → 文本结论。timeout 覆盖默认（秒）。"""
         content = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": _encode_image(image)}},
         ]
-        return self._chat(content, max_tokens=max_tokens)
+        return self._chat(content, max_tokens=max_tokens, timeout=timeout)
 
-    def ask_json(self, prompt: str, image, fields: list[str], max_tokens=1024) -> dict:
-        """结构化视觉问答：要求模型只输出 JSON 对象，键为 fields。"""
+    def ask_json(self, prompt: str, image, fields: list[str], max_tokens=1024,
+                 timeout=None) -> dict:
+        """结构化视觉问答：要求模型只输出 JSON 对象，键为 fields。
+        timeout 覆盖默认（秒）——高风险短等待场景（如弹窗 AI 决策）可收紧。"""
         schema = ", ".join(f'"{f}": 值' for f in fields)
         content = [
             {"type": "text", "text":
@@ -137,7 +139,7 @@ class Vision:
                 f"字段: {{{schema}}}。"},
             {"type": "image_url", "image_url": {"url": _encode_image(image)}},
         ]
-        text = self._chat(content, max_tokens=max_tokens)
+        text = self._chat(content, max_tokens=max_tokens, timeout=timeout)
         # 剥离可能的 ```json 围栏
         text = text.strip()
         if text.startswith("```"):
@@ -147,19 +149,20 @@ class Vision:
         except json.JSONDecodeError as e:
             raise ValueError(f"视觉模型未返回合法 JSON: {text[:200]} ({e})")
 
-    def _chat(self, content, max_tokens) -> str:
+    def _chat(self, content, max_tokens, timeout=None) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": max_tokens,
         }
+        to = timeout if timeout is not None else self.timeout
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(body).encode(),
             headers={"Content-Type": "application/json",
                      "Authorization": "Bearer " + self.api_key})
         try:
-            with urlopen_with_ssl_fallback(req, self.timeout)[0] as r:
+            with urlopen_with_ssl_fallback(req, to)[0] as r:
                 resp = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             raise RuntimeError(f"视觉 API HTTP {e.code}: {e.read().decode()[:300]}")

@@ -126,6 +126,29 @@ def _tap_rid_raw(t, rid):
     return False
 
 
+def _ensure_step(t, name):
+    """防御：框架 record()/blocked() 直接解引用 _cur_step，未开 step 时会崩。
+
+    本模块所有 goto_*/test_* 内部都会 record，隐含要求调用方先 t.step()。
+    这个契约既没写进 docstring 也没有空值保护，新用例直接复用流程函数必崩
+    （175 探查时实测踩到）。调用方应当自己开 step，这里只兜底。
+    """
+    if getattr(t, "_cur_step", None) is None:
+        t.step(name)
+
+
+def _tap_if_present(t, text, wait=3):
+    """存在才点，不存在静默跳过。
+
+    权限弹窗/提示框可能已被看门狗提前处理掉，此时 tap_text 找不到目标会记一条
+    WARN，把环境噪音算进用例结论（175 探查实测到 '全部允许' 误报）。先判存再点。
+    """
+    if t.wait_text(text, timeout=wait):
+        t.tap_text(text, wait=2)
+        return True
+    return False
+
+
 def restart_calendar(t, pm_clear=True):
     """冷启动日历并过掉首次引导弹窗。pm_clear=True 会清空数据（用例前置）。"""
     if pm_clear:
@@ -145,6 +168,7 @@ def restart_calendar(t, pm_clear=True):
 
 def goto_课程表空状态(t, pm_clear=True):
     """主页 → 更多 → 课程表，保证停在空状态。返回是否成功。"""
+    _ensure_step(t, "前置-进入课程表空状态")
     restart_calendar(t, pm_clear=pm_clear)
     if not tap_more_menu(t):
         t.blocked("无法打开'更多'菜单")
@@ -171,13 +195,30 @@ def goto_手动创建课程表(t, pm_clear=True):
     return True
 
 
-def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40):
+def _on_确认页(t):
+    """设备当前是否已停在「确认课程表基本信息」页（重跑跳过前置用）。"""
+    try:
+        if "确认课程表基本信息" in " ".join(t.screen_text()):
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_if_ready=False):
     """完整图库导入链路 → 到达「确认课程表基本信息」页。
 
     对应 knowledge/com.zui.calendar.md 的「标准链路/图库导入创建课程表」。
     步骤：导入入口 → 知道了 → 允许权限 → 照片tab → 选图 → 裁剪完成
           → 等解析 → 下一步
+
+    skip_if_ready=True：设备已在确认页时跳过 pm_clear + 导入直接返回 True，
+    供失败重跑省前置（1-2 分钟）；前提不满足自动回落完整导入。
     """
+    if skip_if_ready and _on_确认页(t):
+        t.record("INFO", "设备已在确认页，跳过 pm_clear+图库导入（skip_if_ready）")
+        return True
+
     if not goto_课程表空状态(t, pm_clear=pm_clear):
         return False
 
@@ -191,13 +232,21 @@ def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40):
         t.blocked("未找到'从图库导入课程表'按钮")
         return False
     _sleep(2)
-    t.tap_text("知道了", wait=3)
+    # 用本模块的 _dismiss_image_hint 而非裸 tap_text：它轮询等框出现，且能识别
+    # "已被看门狗关掉 / 直接进了 PhotoPicker"从而跳过。裸 tap_text 在看门狗抢先
+    # 关框时找不到'知道了'，会白白记一条 WARN（175 探查时实测踩到）。
+    _dismiss_image_hint(t)
     _sleep(2.5)
-    t.tap_text("全部允许", wait=4)      # 系统照片权限
+    _tap_if_present(t, "全部允许", wait=4)   # 系统照片权限（可能已被看门狗点掉）
     _sleep(3.5)
 
-    t.tap_text("照片", wait=3)           # PhotoPicker 切到照片 tab
+    _tap_if_present(t, "照片", wait=6)      # PhotoPicker 切到照片 tab
     _sleep(3)
+    # PhotoPicker 首次冷启动渲染较慢，tab 切换可能落空（175 第二次跑实测 BLOCKED）。
+    # 没看到缩略图就再切一次 tab，再等一轮，避免把时序问题记成环境 BLOCKED。
+    if not t.el_bounds(rid=PHOTO_THUMB):
+        _tap_if_present(t, "照片", wait=5)
+        _sleep(3)
     if not _tap_rid_raw(t, PHOTO_THUMB):
         t.blocked("PhotoPicker 无可选图片（缺素材或未被 MediaStore 收录）")
         return False

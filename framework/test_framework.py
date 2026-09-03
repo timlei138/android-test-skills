@@ -7,6 +7,7 @@ import io
 import os
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 
@@ -34,6 +35,14 @@ REPORT_DIR = os.path.join(STORAGE_DIR, "reports")
 #                            /meta.json     元信息（时间/包名/前台Activity）
 # 纯文本存储，agent 可直接 grep / re 检索，不必连设备
 PROBE_DIR = os.path.join(STORAGE_DIR, "probes")
+# 采集会话档案（探查/采集模式开启，正常回归不开）：
+#   storage/traces/<用例名>/<会话时间戳>/  一次采集会话一个目录
+#     00001.xml … 000NN.xml   每次 _dump() 的 UI 树快照（原始档案）
+#     events.jsonl            统一事件日志（动作/等待/看门狗/异常，逐行 JSON）
+#     index.json              dump 序号 ↔ 时间/触发点 的对应关系
+# 用途：probes 语义缓存缺料或排查异常时，从档案"重新找"当时那份 dump，
+#       不必重跑真机。events 定位"卡在哪个动作"，dump 快照看"当时页面状态"。
+TRACE_DIR = os.path.join(STORAGE_DIR, "traces")
 ACTION_DELAY = 1.0   # 每次操作后的统一延时（防动画/时序竞态）
 
 # 弹窗自动点击词表（u2 原生 watcher 注册用）
@@ -45,6 +54,28 @@ DIALOG_DENY_WORDS = ("拒绝并不再询问", "拒绝", "不允许", "禁止")
 # AI 学习词表持久化文件：AI 处理过的未知弹窗按钮自动并入，下次走快路径
 LEARNED_WORDS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "dialog_words.json")
+
+
+def _dump_call_src():
+    """定位 _dump() 的业务调用点（供 TraceRecorder.snapshot 登记 src）。
+
+    回溯调用栈：0=_dump_call_src 1=_dump 2=直接调用者（如 el_bounds），
+    再向上取业务层（如 tap_text 的源码行）作参考链。语义上下文（probe
+    label）存在 recorder.ctx 时优先于本标签。定位失败退回 "dump"。
+    """
+    try:
+        fr = sys._getframe(2)
+        fr1 = fr
+        try:
+            fr1 = sys._getframe(4)
+        except ValueError:
+            pass
+        chain = f"{fr.f_code.co_name}:{fr.f_lineno}"
+        if fr1 is not fr and fr1.f_code.co_name != fr.f_code.co_name:
+            chain = f"{fr1.f_code.co_name}:{fr1.f_lineno} -> {chain}"
+        return chain
+    except Exception:
+        return "dump"
 
 
 def _parse_nodes(xml):
@@ -165,6 +196,10 @@ class TestCase:
         self._shot_idx = 0
         self._ocr = None
         self._dump_count = 0
+        # 采集会话档案：TraceRecorder 独立模块承担落盘，TestCase 只做委托
+        # （set_trace 开启后 dump 快照全落盘 + events.jsonl + index.json）
+        from trace_recorder import TraceRecorder
+        self.trace = TraceRecorder(STORAGE_DIR)
         self._vision = None
         # 弹窗 watcher 状态：单连接 + 主流程驱动，无独立线程、无并发 dump
         self._wd_enabled = False
@@ -206,13 +241,43 @@ class TestCase:
         所有 dump_hierarchy 调用必须走这里，便于量化每用例的 UI 采集成本
         （finish() 会打印总次数）。弹窗看门狗由各调用方拿到 xml 后喂
         _run_dialog_watchers，不在这里做——保持"采集"与"检查"解耦。
+        trace 模式开启时（set_trace），每次 dump 快照落盘到采集会话档案，
+        供事后排查 / 补料（见 _trace_snapshot）。
         """
         # 单测用 object.__new__(TestCase) 绕过 __init__，此计数属性可能缺失；
         # 惰性补齐，避免纯逻辑单测因未初始化而报错。
         if not hasattr(self, "_dump_count"):
             self._dump_count = 0
+        if not hasattr(self, "trace"):
+            from trace_recorder import TraceRecorder
+            self.trace = TraceRecorder(STORAGE_DIR)
         self._dump_count += 1
-        return self.d.dump_hierarchy()
+        xml = self.d.dump_hierarchy()
+        self.trace.snapshot(xml, src=_dump_call_src())
+        return xml
+
+    # ── 采集会话档案：薄委托 TraceRecorder（trace_recorder.py）──────
+    def set_trace(self, on=True):
+        """开启采集会话档案：之后每次 _dump() 的 UI 树快照与关键事件全部落盘
+        storage/traces/<用例名>/<会话时间戳>/。
+
+        事后排查：events.jsonl 定位"卡在哪个动作"（超时/错误），dump 快照看
+        "当时页面什么状态"；probes 缺料也能从原始快照重新解析。
+        仅探查/采集脚本显式调用；正式回归不开 → 零额外 IO，行为不变。
+        """
+        if on:
+            self.trace.start(self.name)
+            print(f"   📼 采集会话: {self.trace.session_dir}")
+        else:
+            self.trace.stop()
+
+    def _event(self, etype, detail, result=None, start=None):
+        """统一事件日志（委托 TraceRecorder，trace 关闭时为空操作）。
+        事件流与 dump 快照共享会话时间线：排查先看事件定位问题动作。"""
+        rec = getattr(self, "trace", None)
+        if rec is None:
+            return None
+        return rec.event(etype, detail, result=result, start=start)
 
     def _probe_device_info(self):
         """采集设备身份信息：serial + 型号 + Android 版本 + 屏幕尺寸。"""
@@ -354,7 +419,9 @@ class TestCase:
         if not self._wd_enabled or not xml:
             return
         words = self._dialog_words(self._wd_policy)
-        if any(f'text="{w}"' in xml for w in words):
+        hit = next((w for w in words if f'text="{w}"' in xml), None)
+        if hit:
+            self._event("watchdog", f"词表命中 {hit!r}", result="click")
             try:
                 from uiautomator2.xpath import PageSource
                 self.d.watcher.run(PageSource.parse(xml))
@@ -387,6 +454,7 @@ class TestCase:
             return
         self._ai_dialog_calls += 1
         self._ai_dialog_last = now
+        self._event("watchdog", "词表未命中疑似弹窗 → AI 视觉识别", result="ai_call")
         try:
             raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
                                  capture_output=True).stdout
@@ -406,7 +474,8 @@ class TestCase:
                 "没有弹窗时 is_dialog=false, action=skip。",
                 raw,
                 fields=["is_dialog", "title", "buttons", "action",
-                        "button_to_click", "confidence"])
+                        "button_to_click", "confidence"],
+                timeout=25)   # 弹窗决策短等待：网络抖动不拖 90s，宁错过下轮再查
         except Exception as e:
             print(f"🤖 [AI弹窗] 识别失败: {e}")
             return
@@ -441,6 +510,7 @@ class TestCase:
                 return
             if self.d(text=btn).click_exists(timeout=0.6):
                 print(f"🤖 [AI弹窗] 已按 AI 建议点击 {btn!r}（{title}）")
+                self._event("watchdog", f"AI 点击 {btn!r}（{title}）", result="ai_click")
                 # 学习：按钮文字并入对应词表，下次同款弹窗走快路径
                 cat = {"close": "guide", "allow": "allow", "deny": "deny"}.get(action)
                 if cat:
@@ -517,6 +587,14 @@ class TestCase:
         - rid: 关联元素 resource-id，自动附 read_rid 状态（enabled/selected/checked/clickable）
         - evidence: 所有结果默认自动截图留证（验证点截图）
         """
+        # 兜底：调用方忘了开 step 时自动补一个可追溯的步骤，而不是崩在
+        # "TypeError: 'NoneType' object is not subscriptable" —— 那个报错完全
+        # 看不出根因是没调 t.step()，排查成本极高（175 用例踩过）。
+        # 步骤名带标注，报告里一眼能看出哪个用例漏写了 step，方便回头补规范。
+        # 必须在构造 entry 之前补：_log_action 与证据登记都判 _cur_step 是否为 None，
+        # 晚一步补就会静默丢掉操作日志和截图证据。
+        if self._cur_step is None:
+            self.step("（未显式声明 step）")
         entry = {"result": result, "detail": detail}
         # 状态快照：状态类断言必须记录实际状态值（以 case 为准原则）
         if rid:
@@ -747,20 +825,26 @@ class TestCase:
         """轮询等待元素（resource-id）出现。出现返回 True，超时 False。
         每次轮询都会 dump UI 树并顺带驱动弹窗看门狗。"""
         deadline = time.time() + timeout
+        t0 = time.time()
         while True:
             if self.el_bounds(rid=rid):
+                self._event("wait", f"rid={rid}", result="hit", start=t0)
                 return True
             if time.time() >= deadline:
+                self._event("wait", f"rid={rid}", result="timeout", start=t0)
                 return False
             time.sleep(interval)
 
     def wait_text(self, text, timeout=10.0, interval=0.5):
         """轮询等待指定文字出现。出现返回 True，超时 False。"""
         deadline = time.time() + timeout
+        t0 = time.time()
         while True:
             if self.el_bounds(text=text):
+                self._event("wait", f"text={text}", result="hit", start=t0)
                 return True
             if time.time() >= deadline:
+                self._event("wait", f"text={text}", result="timeout", start=t0)
                 return False
             time.sleep(interval)
 
@@ -768,14 +852,17 @@ class TestCase:
         """轮询等待前台 Activity 包含 substr（大小写不敏感）。
         命中返回完整 Activity 名，超时返回 ""（falsy，可直接当 bool 用）。"""
         deadline = time.time() + timeout
+        t0 = time.time()
         while True:
             try:
                 act = self.current_activity()
             except Exception:
                 act = ""
             if substr.lower() in act.lower():
+                self._event("wait", f"activity={substr}", result="hit", start=t0)
                 return act
             if time.time() >= deadline:
+                self._event("wait", f"activity={substr}", result="timeout", start=t0)
                 return ""
             time.sleep(interval)
 
@@ -1106,7 +1193,12 @@ class TestCase:
             if ttl is None or (time.time() - os.path.getmtime(fp)) < ttl:
                 with open(fp, encoding="utf-8") as f:
                     return f.read()
-        xml = self._dump()
+        prev = self.trace.ctx                # 语义上下文：本次 dump 归属该 label
+        self.trace.set_ctx(f"probe:{label}")
+        try:
+            xml = self._dump()
+        finally:
+            self.trace.ctx = prev
         os.makedirs(d, exist_ok=True)
         with open(fp, "w", encoding="utf-8") as f:
             f.write(xml)
