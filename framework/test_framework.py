@@ -639,21 +639,30 @@ class TestCase:
             return self.d(text=text)
         raise ValueError("需要 rid 或 text")
 
-    def tap_rid(self, rid):
+    def tap_rid(self, rid, observe=True):
+        """点 resource-id 元素。observe=False：跳过弹窗检查/截图/延迟，
+        用于触发后需立即抓 toast 的动作（默认链的弹窗检查会占满 toast 显示窗口）。"""
         t0 = time.time()
         self._el(rid=rid).click()
+        if not observe:               # 触发后要立即抓 toast/浮层：跳过检查窗口，不延迟不截图
+            self._log_action("tap", f"rid={rid} observe=False", t0)
+            return self
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
         self._log_action("tap", f"rid={rid}", t0)
         self._auto_screenshot(f"点击_{rid}")
         return self
 
-    def tap_text(self, text, wait=5.0):
-        """点文字按钮；元素未出现时轮询等待（防导航/时序抖动）"""
+    def tap_text(self, text, wait=5.0, observe=True):
+        """点文字按钮；元素未出现时轮询等待（防导航/时序抖动）。
+        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
         for _ in range(int(wait / 0.5)):
             try:
                 if self.d(text=text).click_exists(timeout=0.3):
                     t0 = time.time()
+                    if not observe:   # 要立即抓 toast：跳过检查窗口
+                        self._log_action("tap", f"text={text} observe=False", t0)
+                        return self
                     time.sleep(ACTION_DELAY)
                     self._check_dialogs_after_action()
                     self._log_action("tap", f"text={text}", t0)
@@ -713,14 +722,18 @@ class TestCase:
                 return n["bounds_xy"]
         return None
 
-    def tap_el(self, rid=None, text=None, desc=None, xpath=None, wait=5.0):
-        """按 资源id/文字/内容描述/xpath 点击（元素定位优先，坐标兜底）"""
+    def tap_el(self, rid=None, text=None, desc=None, xpath=None, wait=5.0, observe=True):
+        """按 资源id/文字/内容描述/xpath 点击（元素定位优先，坐标兜底）。
+        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
         for _ in range(int(wait / 0.5)):
             b = self.el_bounds(rid=rid, text=text, desc=desc)
             if b:
                 t0 = time.time()
                 x1, y1, x2, y2 = b
                 self.d.click((x1 + x2) // 2, (y1 + y2) // 2)
+                if not observe:       # 要立即抓 toast：跳过检查窗口
+                    self._log_action("tap", f"bounds=({x1},{y1},{x2},{y2}) observe=False", t0)
+                    return self
                 time.sleep(ACTION_DELAY)
                 self._check_dialogs_after_action()
                 self._log_action("tap", f"bounds=({x1},{y1},{x2},{y2})", t0)
@@ -730,9 +743,10 @@ class TestCase:
         self.record("WARN", f"tap_el 未找到元素: rid={rid} text={text} desc={desc}")
         return self
 
-    def tap_desc(self, desc, wait=5.0):
-        """按 content-desc 点击（图标按钮常用）"""
-        return self.tap_el(desc=desc, wait=wait)
+    def tap_desc(self, desc, wait=5.0, observe=True):
+        """按 content-desc 点击（图标按钮常用）。
+        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
+        return self.tap_el(desc=desc, wait=wait, observe=observe)
 
     # ── 必需操作（强语义）：找不到元素 = FAIL 并中止用例 ─────────────
     # tap_* 系列失败只记 WARN（可选步骤用）；链路关键步骤用 require_*，
@@ -763,10 +777,15 @@ class TestCase:
                 raise CaseAbort(f"require_tap_el({rid or text or desc!r}) 超时")
             time.sleep(0.5)
 
-    def tap_xy(self, x, y):
-        """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）"""
+    def tap_xy(self, x, y, observe=True):
+        """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）。
+        observe=False：跳过弹窗检查窗口/截图/延迟 —— 用于"触发后要立即抓 toast"
+        的动作（tap 默认链的弹窗检查会占满 toast 的 ~2s 显示窗口，导致抓空）。"""
         t0 = time.time()
         self.d.click(x, y)
+        if not observe:
+            self._log_action("tap", f"x={x}, y={y} observe=False", t0)
+            return self
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
         self._log_action("tap", f"x={x}, y={y}", t0)
@@ -1125,14 +1144,28 @@ class TestCase:
         self._log_action("screenshot", label, t0)
         return path
 
-    def capture_toast(self, wait=1.5, max_lines=3):
-        """捕捉 Toast: 读 logcat 最近 Toast 文本"""
-        subprocess.run(self._adb("logcat", "-c"), capture_output=True)
-        time.sleep(wait)
-        out = subprocess.run(self._adb("logcat", "-d", "-s", "Toast"),
-                             capture_output=True, text=True).stdout
-        m = re.findall(r"showToast.*?text=([^\s]+)", out)
-        return m[-1] if m else None
+    def capture_toast(self, wait=1.0, label="toast", y_min=0, y_max=99999):
+        """捕捉 Toast：动作后立即截屏定格 → OCR 读屏 → (文本列表, 截图路径)。
+
+        Toast 是屏幕视觉元素且显示窗口短（~2-3.5s）。logcat 的 Toast 缓冲在
+        多数 ROM 上不打印或格式不一，**不可靠 —— 禁止用 logcat 捕 toast**。
+        正确姿势（本方法已封装）：
+          1. 动作后立即调用（内部等 wait 秒让 toast 渲染，窗口内截屏最稳）
+          2. 截图落盘留证（toast 消失后画面已定格）
+          3. OCR 全屏 → 返回文本列表，toast 文案混在其中
+        断言示例：
+            texts, shot = t.capture_toast()
+            ok = any("时间冲突" in s for s in texts)
+            t.record("PASS" if ok else "FAIL", f"toast={texts}")
+        OCR 混背景读不准半透明 toast 时，配视觉模型兜底：
+            t.vision_ask("屏幕上是否有 toast 提示？内容是什么",
+                         bounds=(0, y_min, W, y_max))
+        y_min/y_max 可裁剪 OCR 区域（toast 通常在屏幕底部，可传 y_min=屏高*0.7 减噪）。
+        """
+        time.sleep(wait)                                    # 等 toast 渲染出来
+        path = self._auto_screenshot(label, add_to_step=True)
+        hits = self.ocr(y_min=y_min, y_max=y_max)
+        return [text for _, _, _, text in hits], path
 
     def screen_text(self):
         xml = self._dump()
@@ -1319,10 +1352,16 @@ class TestCase:
         total = pass_n + fail_n          # 仅 PASS/FAIL 计入断言统计
         self.final_status = self._compute_final_status()
         LAST_CASE = self                 # run_case.py 取最终结论定退出码
+        # 包名同时入库：报告文件可能丢，库里的记录不会丢，
+        # 重建报告时才能原样还原「被测 App」这一栏。
+        try:
+            package = self.d.app_current().get("package") or None
+        except Exception:
+            package = None                       # 断连等异常不该挡住报告生成
         lines = [f"# 测试报告：{self.name}",
                  f"\n**测试日期**：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
                  f"**设备**：{self.device_info}",
-                 f"**被测 App**：{self.d.app_current().get('package', 'unknown')}",
+                 f"**被测 App**：{package or 'unknown'}",
                  f"**最终结论**：{self.final_status}",
                  f"**证据目录**：{self.case_dir}\n"]
         for s in self.steps:
@@ -1354,7 +1393,7 @@ class TestCase:
             try:
                 self._db.finish_case(
                     self._db_case_id, path, summary,
-                    final_status=self.final_status)
+                    final_status=self.final_status, package=package)
             except Exception as e:
                 # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
                 print(f"⚠️ [db] 用例完成状态入库失败: {e}")

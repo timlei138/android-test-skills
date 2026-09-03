@@ -52,6 +52,11 @@ def collect():
     # 2) 看摘要里可交互项，挑下一跳文本追加一行：
     #        if not t.tap_text("下一跳入口", wait=4): print("没找到，检查上一步摘要")
     # 3) 再 probe_page("页面B") → 如此推进；每轮真机 2-5s
+    # 4) 关键动作（保存/提交/改配置后确定等）后立即抓反馈落盘——
+    #    探索要走完业务闭环，动态文案（toast）必须此刻记录，用例期不许猜：
+    #        t.tap_text("完成")
+    #        texts, shot = t.capture_toast()        # 截屏 OCR，截图自动留证
+    #        print("动作后 toast/屏面文本:", texts)
     info = t.probe_page("页面A")               # ← 首跳：把"页面A"换成语义名
     print("页面A texts:", info["texts"][:30])
     print("页面A rids :", info["rids"][:30])

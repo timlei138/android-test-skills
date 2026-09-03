@@ -212,19 +212,17 @@ if ($SkipDeviceCheck) {
     }
 }
 
-# ------------------------------------------------------------ 5. 拷贝框架
-Write-Step '5/5 拷贝框架到工作目录...'
+# ------------------------------------------------------ 5. 建工作区数据目录
+Write-Step '5/5 建工作区数据目录...'
 New-Item -ItemType Directory -Path $Workspace -Force | Out-Null
-# 用例与知识卡留在 skill 包（单一数据源，随版本同步）；工作区只建运行产物目录
-foreach ($dir in @('framework', 'storage', 'storage\reports', 'storage\screenshots')) {
-    $src = Join-Path $SkillDir $dir
-    if (Test-Path -LiteralPath $src) {
-        $dst = Join-Path $Workspace $dir
-        Copy-Item -LiteralPath $src -Destination $dst -Recurse -Force
-        Write-Ok "$dir -> $dst"
-    } else {
-        Write-Warn "skill 包内缺少 $dir，已跳过"
-    }
+# 代码（framework/）、用例（cases/）、知识卡（knowledge/）一律留在 skill 包 —— 那是 Agent
+# 实际加载的地方，也是唯一权威。工作区只放运行产物：换了 Agent 也能共享，重装 skill 不会丢。
+# 不要再往工作区复制 framework/：run_case.ps1 优先用 skill 包那份，复制过去只会多一份
+# 需要维护的副本（还会触发 run_case.py 的副本比对告警）。
+foreach ($dir in @('storage', 'storage\reports', 'storage\screenshots')) {
+    $dst = Join-Path $Workspace $dir
+    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    Write-Ok "$dir -> $dst"
 }
 
 # ------------------------------------------------- 可选: AutoGLM agent 环境
@@ -274,8 +272,8 @@ Write-Host ''
 Write-Host "  # 跑示例用例（用例按包名分目录：cases\<包名>\<编号>.py）" -ForegroundColor DarkGray
 Write-Host "  pwsh -File `"$SkillDir\run_case.ps1`" -Case `"com.zui.calendar/172.py`""
 Write-Host ''
-Write-Host "  # 等价的原生写法"
-Write-Host "  cd `"$Workspace\framework`""
+Write-Host "  # 等价的原生写法（注意 cd 到 skill 包，不是工作区）"
+Write-Host "  cd `"$SkillDir\framework`""
 Write-Host "  & `"$VenvPy`" run_case.py `"com.zui.calendar/172.py`""
 Write-Host ''
 Write-Host "  # 启动 Web 测试台 (http://127.0.0.1:8900)"

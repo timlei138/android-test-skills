@@ -12,6 +12,7 @@
 """
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime
@@ -23,6 +24,52 @@ def default_test_dir() -> str:
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
     return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+
+
+# ── 容错删除 ────────────────────────────────────────────────────────
+# 判定标准是「磁盘上还在不在」，而不是「有没有抛异常」。
+# 原因：某些运行环境会给 Python 注入「安全删除」shim，把 os.remove 改走
+# 系统回收站。这类 shim 有两种误报：
+#   1) 文件确实已经删掉了，但回收站二次确认返回 0x2（文件不存在）→ 照样抛异常；
+#   2) 一次删除数量超过阈值时直接抛错要求人工确认（FAIL_CLOSED）。
+# 两种情况下异常都不代表删除失败，只有「文件还在」才算失败。
+def safe_remove(path) -> bool:
+    """删除单个文件。返回是否删除成功（原本就不存在 → False，不算错误）。"""
+    try:
+        if not os.path.isfile(path):
+            return False
+    except OSError:
+        return False
+    try:
+        os.remove(path)
+        return True
+    except Exception:
+        try:
+            if not os.path.exists(path):   # 抛了异常但文件没了 → 实际删成功
+                return True
+        except OSError:
+            pass
+        return False
+
+
+def safe_rmtree(path) -> bool:
+    """删除目录树。返回是否删除成功（原本就不存在 → False，不算错误）。"""
+    import shutil
+    try:
+        if not os.path.isdir(path):
+            return False
+    except OSError:
+        return False
+    try:
+        shutil.rmtree(path)
+        return True
+    except Exception:
+        try:
+            if not os.path.exists(path):
+                return True
+        except OSError:
+            pass
+        return False
 
 
 def default_db_path() -> str:
@@ -82,6 +129,9 @@ _MIGRATIONS = [
     # final_status：用例最终结论（PASS/FAIL/BLOCKED/WARN/ERROR），由框架显式写入。
     # 老库没有此列时，列表查询回退到摘要文本推断（仅兼容历史数据，新数据不再推断）。
     "ALTER TABLE cases ADD COLUMN final_status TEXT",
+    # package：被测 App 包名。报告丢了可以重建，但包名只写在报告里 ——
+    # 不入库的话重建出来的报告这一栏就是空的。
+    "ALTER TABLE cases ADD COLUMN package TEXT",
 ]
 
 
@@ -151,14 +201,66 @@ class RecordDB:
             return cur.lastrowid
 
     def finish_case(self, case_id, report_path, summary, final_status=None,
-                    finished_at=None):
+                    finished_at=None, package=None):
+        """收尾一条记录。
+
+        package 是被测 App 包名 —— 以前只写进报告文件，报告丢了就跟着丢；
+        现在入库，重建报告时能原样还原。
+        """
         with self._lock:
-            self._connect().execute(
-                "UPDATE cases SET finished_at=?, report_path=?, summary=?,"
-                " final_status=? WHERE id=?",
-                (finished_at or datetime.now().isoformat(timespec="seconds"),
-                 report_path, summary, final_status, case_id))
+            if package:
+                self._connect().execute(
+                    "UPDATE cases SET finished_at=?, report_path=?, summary=?,"
+                    " final_status=?, package=? WHERE id=?",
+                    (finished_at or datetime.now().isoformat(timespec="seconds"),
+                     report_path, summary, final_status, package, case_id))
+            else:
+                # 没拿到包名就别把已有的覆盖成 NULL
+                self._connect().execute(
+                    "UPDATE cases SET finished_at=?, report_path=?, summary=?,"
+                    " final_status=? WHERE id=?",
+                    (finished_at or datetime.now().isoformat(timespec="seconds"),
+                     report_path, summary, final_status, case_id))
             self._local.conn.commit()
+
+    def backfill_package(self, dry_run=False):
+        """给历史记录补 package 列。
+
+        背景：package 列是后加的，加之前跑的记录该列为空。好在 script_path
+        是 `.../cases/<包名>/<脚本>.py` 结构，目录名就是包名，可以直接反推。
+
+        只认「长得像包名」的目录名（纯 ASCII、含点、无空白），像
+        `cases/联想日历_168.py` 这种不是包名的一律跳过 —— 宁可留空也不猜。
+
+        dry_run=True 时只报告不写库。返回 [(case_id, package), ...]。
+        """
+        # com.zui.calendar / com.tencent.mm 这类：段首小写字母，段内字母数字下划线
+        pkg_re = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")
+        with self._lock:
+            cur = self._connect().cursor()
+            cur.execute("SELECT id, script_path, package FROM cases")
+            rows = cur.fetchall()
+            filled = []
+            for r in rows:
+                # 用索引取值：连接未必设了 row_factory，元组下标最稳
+                cid, script_path, package = r[0], r[1], r[2]
+                if (package or "").strip():
+                    continue                       # 已有值，不动
+                sp = (script_path or "").replace("\\", "/")
+                # 取 cases/ 之后的第一段
+                m = re.search(r"/cases/([^/]+)/", sp)
+                if not m:
+                    continue
+                cand = m.group(1)
+                if not pkg_re.match(cand):
+                    continue                       # 不是包名形态，跳过
+                filled.append((cid, cand))
+                if not dry_run:
+                    self._connect().execute(
+                        "UPDATE cases SET package=? WHERE id=?", (cand, cid))
+            if not dry_run and filled:
+                self._local.conn.commit()
+            return filled
 
     # ── steps ────────────────────────────────────────────────────────
     def add_step(self, case_id, name, ord_):
@@ -207,7 +309,7 @@ class RecordDB:
         with self._lock:
             cur = self._connect().cursor()
             sql = ("SELECT id, name, device, started_at, finished_at, report_path, summary,"
-                   " user_input, script_path,"
+                   " user_input, script_path, package,"
                    " CASE WHEN started_at IS NOT NULL AND finished_at IS NOT NULL THEN"
                    "  ROUND((julianday(finished_at) - julianday(started_at)) * 86400, 1)"
                    " ELSE NULL END as duration_seconds,"
@@ -226,7 +328,7 @@ class RecordDB:
             cur.execute(sql, params)
             cols = ["id", "name", "device", "started_at", "finished_at",
                     "report_path", "summary", "user_input", "script_path",
-                    "duration_seconds", "status"]
+                    "package", "duration_seconds", "status"]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
 
     def delete_case(self, case_id, remove_artifacts=False):
@@ -271,21 +373,28 @@ class RecordDB:
             return 0
 
         # ── 磁盘产物删除（锁外执行，文件 IO 不阻塞其它记录操作）──
-        import shutil
+        # 数据库行已经删掉了：产物清理只是顺手打扫，**任何失败都不能回滚 /
+        # 不能往上抛**——否则调用方（Web UI）会把整次删除判成失败，甚至因为
+        # 未捕获异常把连接掐断，前端只看到一句无头无脑的 "Failed to fetch"。
+        try:
+            removed += self._remove_artifacts(evidence_paths, report_path, case_id)
+        except Exception:
+            pass
+        return removed
+
+    def _remove_artifacts(self, evidence_paths, report_path, case_id):
+        """删除一次执行的磁盘产物（截图目录 + 报告及同前缀备份），返回删除数。"""
+        removed = 0
         shot_dirs = set()
         for p in evidence_paths:
             if not is_artifact_path(p):   # 只删运行产物目录内的文件
                 continue
-            try:
-                parent = os.path.dirname(os.path.abspath(p))
-                # case_* 目录（一次执行一个目录）按目录删，其它散文件按文件删
-                if os.path.basename(parent).startswith("case_"):
-                    shot_dirs.add(parent)
-                elif os.path.isfile(p):
-                    os.remove(p)
-                    removed += 1
-            except OSError:
-                pass
+            parent = os.path.dirname(os.path.abspath(p))
+            # case_* 目录（一次执行一个目录）按目录删，其它散文件按文件删
+            if os.path.basename(parent).startswith("case_"):
+                shot_dirs.add(parent)
+            elif safe_remove(p):
+                removed += 1
         for d in shot_dirs:
             if not is_artifact_path(d):   # 整目录删除前同样过白名单
                 continue
@@ -293,15 +402,11 @@ class RecordDB:
             if self._dir_referenced_elsewhere(d, exclude_case=case_id):
                 for p in {e for e in evidence_paths
                           if os.path.dirname(os.path.abspath(e)) == d}:
-                    try:
-                        if os.path.isfile(p):
-                            os.remove(p)
-                            removed += 1
-                    except OSError:
-                        pass
+                    if safe_remove(p):
+                        removed += 1
             else:
-                shutil.rmtree(d, ignore_errors=True)
-                removed += 1
+                if safe_rmtree(d):
+                    removed += 1
         # 报告：主报告 + 同前缀时间戳备份（联想日历_168_20260902_151054_报告.md）
         if report_path:
             rp = os.path.abspath(report_path)
@@ -316,14 +421,8 @@ class RecordDB:
             except OSError:
                 pass
             for p in candidates:
-                if not is_artifact_path(p):
-                    continue
-                try:
-                    if os.path.isfile(p):
-                        os.remove(p)
-                        removed += 1
-                except OSError:
-                    pass
+                if is_artifact_path(p) and safe_remove(p):
+                    removed += 1
         return removed
 
     def _dir_referenced_elsewhere(self, shot_dir, exclude_case):
@@ -352,14 +451,14 @@ class RecordDB:
             conn = self._connect()
             cur = conn.cursor()
             cur.execute("SELECT id, name, device, started_at, finished_at, report_path, summary,"
-                        " user_input, script_path, final_status"
+                        " user_input, script_path, final_status, package"
                         " FROM cases WHERE id=?", (case_id,))
             row = cur.fetchone()
             if not row:
                 return None
             case = dict(zip(["id", "name", "device", "started_at", "finished_at",
                              "report_path", "summary", "user_input", "script_path",
-                             "final_status"], row))
+                             "final_status", "package"], row))
             cur.execute("SELECT id, name, ord FROM steps WHERE case_id=? ORDER BY ord", (case_id,))
             steps = []
             for sid, sname, sord in cur.fetchall():

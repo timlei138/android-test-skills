@@ -50,14 +50,15 @@ else
     echo "     $WORKSPACE/.venv/bin/python -m uiautomator2 init"
 fi
 
-# 5. 拷贝框架（关键步骤：失败即退出）
-echo "▶ 5/5 拷贝框架到工作目录..."
-cp -r "$HERE/framework" "$WORKSPACE/" || { echo "  ❌ 框架拷贝失败"; exit 1; }
-# 用例与知识卡留在 skill 包（单一数据源，随版本同步团队共享）
+# 5. 建工作区数据目录
+echo "▶ 5/5 建工作区数据目录..."
+# 代码（framework/）、用例（cases/）、知识卡（knowledge/）一律留在 skill 包 —— 那是 Agent
+# 实际加载的地方，也是唯一权威。工作区只放运行产物：换 Agent 也能共享，重装 skill 不会丢。
+# 不要往工作区复制 framework/：run_case.ps1 优先用 skill 包那份，复制过去只会多一份
+# 需要维护的副本（还会触发 run_case.py 的副本比对告警）。
 mkdir -p "$WORKSPACE/storage/reports" "$WORKSPACE/storage/screenshots"
-echo "  ✅ 框架已就位: $WORKSPACE/framework"
 echo "  ✅ 运行产物目录: $WORKSPACE/storage/{reports,screenshots}"
-echo "  ✅ 用例/知识卡: $HERE/{cases,knowledge}（单一数据源）"
+echo "  ✅ 代码/用例/知识卡: $HERE/{framework,cases,knowledge}（单一数据源）"
 
 # 可选: AutoGLM agent 环境
 if [ "$1" = "--with-agent" ]; then
@@ -75,7 +76,7 @@ fi
 echo ""
 echo "════════════════════════════════════════════"
 echo "✅ 安装完成！快速开始:"
-echo "  cd $WORKSPACE/framework"
+echo "  cd $HERE/framework          # 注意：cd 到 skill 包，不是工作区"
 echo "  .venv 里执行: $WORKSPACE/.venv/bin/python run_case.py <用例名>.py"
 echo "  示例: $WORKSPACE/.venv/bin/python run_case.py com.zui.calendar/172.py"
 echo "════════════════════════════════════════════"

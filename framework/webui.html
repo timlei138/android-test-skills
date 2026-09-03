@@ -63,9 +63,10 @@
             <th>用例名</th>
             <th>测试类别</th>
             <th>状态</th>
+            <th style="width:140px">开始时间</th>
             <th>总耗时</th>
             <th>Case 输入</th>
-            <th style="width:70px">操作</th>
+            <th style="width:84px">操作</th>
           </tr>
         </thead>
         <tbody id="case-list"></tbody>
@@ -93,7 +94,7 @@
             <th>描述 / 原始输入</th>
             <th style="width:60px">步骤</th>
             <th style="width:130px">修改时间</th>
-            <th style="width:60px">操作</th>
+            <th style="width:84px">操作</th>
           </tr>
         </thead>
         <tbody id="script-list"></tbody>
@@ -185,6 +186,7 @@
   <div class="detail-head">
     <button class="btn-icon" onclick="closeDetail()" title="返回">←</button>
     <h2 id="detail-title">用例详情</h2>
+    <button class="btn-ghost" onclick="rebuildReport(currentCaseId)" title="报告文件丢失/内容对不上时，从数据库记录重新生成">♻️ 重建报告</button>
     <button class="btn-delete" onclick="deleteCase(currentCaseId)">🗑️ 删除</button>
   </div>
   <div class="detail-scroll" id="detail-body"></div>
@@ -213,6 +215,14 @@
 <div class="lightbox" id="lightbox" onclick="closeLightbox()">
   <div class="lightbox-close">×</div>
   <img id="lightbox-img" src="" alt="">
+</div>
+
+<!-- 耗时操作等待框（删除记录/脚本等）：showBusy() 显示、hideBusy() 关闭，z-index 高于详情面板 -->
+<div class="busy" id="busy" style="display:none">
+  <div class="busy-box">
+    <div class="spinner"></div>
+    <div class="busy-text" id="busy-text">处理中…</div>
+  </div>
 </div>
 
 <!-- CodeMirror 本地 bundle（离线可用，非 CDN）→ 暴露 window.CodeMirrorYaml（历史命名） -->

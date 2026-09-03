@@ -7,3 +7,8 @@ __pycache__/
 storage/
 # 视觉模型凭据（明文 api_key，双重保险）
 storage/vision.json
+# 数据区一律不进 skill 包（防御性：这些本该只在 ~/dsh-android-test 下，
+# 万一被误放进来也别入库——db 存着设备序列号，venv 几百 MB，截图动辄上百 MB）
+test_records.db
+.venv/
+_trash_backup/

@@ -28,10 +28,19 @@ try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $SkillDir = $PSScriptRoot
 $VenvPy = if ($Python) { $Python } else { Join-Path $Workspace '.venv\Scripts\python.exe' }
 
-# skill 包内的 framework 始终可用（无需先跑 setup.sh 拷贝）
+# 搜索顺序：skill 包优先，工作区兜底。
+#
+# 为什么 skill 包必须在前：Agent 加载的就是 skill 包（SKILL.md / cases/ / knowledge/
+# 全从那里读），代码也必须同源。反过来排的话，改了 skill 包的代码、跑用例却命中
+# 工作区的旧副本，改动静默失效且不报错 —— 这正是「改了没生效」类问题的根源。
+# 工作区那份是 setup.sh 复制的历史备份，留着无害，但不再参与运行。
+#
+# 注意连带效应：run_case.py 会把自身所在目录插到 sys.path[0]，所以这里选中哪份
+# run_case.py，整套框架（test_framework / db / states / vision…）都跟着那份走，
+# 不是只影响一个文件。同理 cases/ 也会从被选中那份的上一级目录找起。
 $FrameworkDirs = @(
-    (Join-Path $Workspace 'framework'),
-    (Join-Path $SkillDir 'framework')
+    (Join-Path $SkillDir 'framework'),     # 唯一权威：Agent 实际加载的那份
+    (Join-Path $Workspace 'framework')     # 兜底：setup 复制的历史副本
 )
 
 # ------------------------------------------------------------- 前置检查

@@ -6,6 +6,8 @@
 #
 # 同步范围：
 #   framework/*  —— 代码（webui.py/.html/.js/.css、test_framework.py、run_case.py…）
+#   tests/*.py   —— 单元测试（否则工作区 tests/ 是空目录，跑单测会报 Start directory
+#                   is not importable）
 #   根目录脚本  —— run_case.ps1 / setup.* / webui.* / export.sh
 #   SKILL.md     —— 技能说明（工作区与 skill 包保持一致）
 #
@@ -38,6 +40,10 @@ $files = @()
 # framework 下的代码文件
 Get-ChildItem (Join-Path $from 'framework') -File -ErrorAction SilentlyContinue | ForEach-Object {
     $files += Join-Path 'framework' $_.Name
+}
+# 单元测试
+Get-ChildItem (Join-Path $from 'tests') -File -Filter '*.py' -ErrorAction SilentlyContinue | ForEach-Object {
+    $files += Join-Path 'tests' $_.Name
 }
 # 根目录脚本与文档
 foreach ($n in @('SKILL.md','run_case.ps1','setup.ps1','setup.sh','webui.ps1','webui.sh','export.sh')) {

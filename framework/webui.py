@@ -17,7 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from db import get_db, default_test_dir, is_artifact_path  # noqa: E402
+from db import (get_db, default_test_dir, is_artifact_path,  # noqa: E402
+                safe_remove)
 from run_case import extract_user_input_from_source  # noqa: E402
 
 
@@ -415,6 +416,20 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):  # 静默访问日志
         pass
 
+    # ── 兜底：任何未捕获异常都必须变成 JSON 500，绝不能掐断连接 ──
+    # BaseHTTPRequestHandler 不会捕获 handler 里的异常：异常穿出后连接被直接
+    # 关掉，浏览器拿不到任何响应，前端只能报一句无头无脑的 "Failed to fetch"
+    # —— 既看不到原因，也不知道操作到底成没成。所以每个动词都套一层：
+    # 正常返回照旧，异常一律转成 {"error": ...} 500。
+    def _guarded(self, fn):
+        try:
+            fn()
+        except Exception as e:
+            try:
+                self._json({"error": f"{type(e).__name__}: {e}"}, 500)
+            except Exception:
+                pass
+
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
@@ -455,6 +470,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._text("无法读取文件", 500)
 
     def do_GET(self):
+        self._guarded(self._do_GET)
+
+    def _do_GET(self):
         path = self.path.split("?")[0]
         db = get_db()
         if path == "/" or path == "/index.html":
@@ -639,14 +657,22 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_POST(self):
-        """只接收 JSON。目前用于保存视觉模型配置。"""
+        self._guarded(self._do_POST)
+
+    def _do_POST(self):
+        """只接收 JSON。目前用于保存视觉模型配置、批量删除、重建报告。"""
         path = self.path.split("?")[0]
         length = int(self.headers.get("Content-Length", 0))
-        try:
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-        except Exception:
-            self._json({"error": "请求体不是合法 JSON"}, 400)
-            return
+        raw = self.rfile.read(length).decode("utf-8") if length else ""
+        # 重建报告不需要请求体，别拿 body 校验为难它
+        if path.endswith("/rebuild-report"):
+            payload = {}
+        else:
+            try:
+                payload = json.loads(raw) if raw.strip() else {}
+            except Exception:
+                self._json({"error": "请求体不是合法 JSON"}, 400)
+                return
         if path == "/api/vision":
             try:
                 conf, fp = _save_vision_conf(
@@ -687,10 +713,29 @@ class Handler(BaseHTTPRequestHandler):
                 deleted.append(cid)
             self._json({"ok": True, "deleted": deleted,
                         "missing": missing, "removed_files": removed_files})
+        elif (path.startswith("/api/cases/")
+              and path.endswith("/rebuild-report")):
+            # 报告文件丢了不要紧：steps/results 明细都在库里，随时能重新渲染。
+            # 报告只是这些数据的 Markdown 视图。
+            try:
+                cid = int(path.split("/")[-2])
+            except (ValueError, IndexError):
+                self._json({"error": "非法 ID"}, 400)
+                return
+            db = get_db()
+            if db.get_case(cid) is None:
+                self._json({"error": "not found"}, 404)
+                return
+            from report_rebuild import rebuild_report_auto   # 延迟导入，冷启动更快
+            p, summary = rebuild_report_auto(cid, db)
+            self._json({"ok": True, "report_path": p, "summary": summary})
         else:
             self._json({"error": "not found"}, 404)
 
     def do_PUT(self):
+        self._guarded(self._do_PUT)
+
+    def _do_PUT(self):
         path = self.path.split("?")[0]
         if path.startswith("/api/scripts/"):
             # 保存/新建用例脚本（URL 中文需解码；支持 <包名目录>/<文件>.py）
@@ -732,6 +777,9 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
 
     def do_DELETE(self):
+        self._guarded(self._do_DELETE)
+
+    def _do_DELETE(self):
         path = self.path.split("?")[0]
         if path.startswith("/api/scripts/"):
             # 删除用例脚本（URL 中文需解码；支持 <包名目录>/<文件>.py）
@@ -741,11 +789,13 @@ class Handler(BaseHTTPRequestHandler):
             if not name or not fp or not os.path.isfile(fp):
                 self._json({"error": "not found"}, 404)
                 return
-            try:
-                os.remove(fp)
+            # safe_remove：以「文件还在不在」判定成败。某些环境会把删除改走
+            # 回收站（文件已删但仍抛异常），只有文件还在才算真失败。
+            safe_remove(fp)
+            if os.path.exists(fp):
+                self._json({"error": f"文件删除失败（仍存在）: {fp}"}, 500)
+            else:
                 self._json({"ok": True, "deleted": name})
-            except OSError as e:
-                self._json({"error": str(e)}, 500)
             return
         if path.startswith("/api/knowledge/"):
             # 删除知识卡（内置 _template/_system 卡受保护，不可删除）
@@ -762,11 +812,11 @@ class Handler(BaseHTTPRequestHandler):
             if not os.path.isfile(fp):
                 self._json({"error": "not found"}, 404)
                 return
-            try:
-                os.remove(fp)
+            safe_remove(fp)
+            if os.path.exists(fp):
+                self._json({"error": f"文件删除失败（仍存在）: {fp}"}, 500)
+            else:
                 self._json({"ok": True, "deleted": name})
-            except OSError as e:
-                self._json({"error": str(e)}, 500)
             return
         if path.startswith("/api/cases/"):
             try:

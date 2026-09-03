@@ -4,7 +4,24 @@
 
 const $ = s => document.querySelector(s);
 let cases = [], filter = '', kbCurrent = null, kbFiles = [], currentCaseId = null;
-const api = async (p, o) => { const r = await fetch(p, o); if (!r.ok) throw new Error((await r.text()).slice(0,150)); return r.json(); };
+// 统一请求封装：错误提示必须能看懂。
+// 1) 后端返回的 {"error": "..."} 只取 error 字段，不再把整坨 JSON 甩给用户；
+// 2) 连接被掐断时 fetch 只会抛一句 "Failed to fetch"，换成指向明确的提示。
+const api = async (p, o) => {
+  let r;
+  try {
+    r = await fetch(p, o);
+  } catch (e) {
+    throw new Error('无法连接本地服务（Web UI 进程可能已退出或卡死），请刷新页面；仍不行就重启服务');
+  }
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    let msg = '';
+    try { const d = JSON.parse(t); msg = d.error || d.message || ''; } catch (_) {}
+    throw new Error(msg || t.slice(0, 150) || ('HTTP ' + r.status));
+  }
+  return r.json();
+};
 
 function show(name) {
   ['records','scripts','knowledge','vision'].forEach(v => {
@@ -52,10 +69,25 @@ function category(name) {
   return idx > 0 ? n.slice(0, idx) : n;
 }
 function escapeHtml(s) { return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;','\'':'&#39;'}[c])); }
+// started_at / finished_at 形如 "2026-09-03T16:42:44"（或已含空格），列表只显示到分钟
+function fmtDateTime(s) {
+  if (!s) return '-';
+  const t = String(s).replace('T', ' ').trim();
+  return t.length >= 16 ? t.slice(0, 16) : t;
+}
+
+// ── 等待框：删除记录/脚本等耗时操作期间阻塞交互，结束即消失 ──
+function showBusy(text) {
+  const b = $('#busy'), t = $('#busy-text');
+  if (!b) return;
+  if (t) t.textContent = text || '处理中…';
+  b.style.display = 'grid';
+}
+function hideBusy() { const b = $('#busy'); if (b) b.style.display = 'none'; }
 
 async function loadCases() {
   try { cases = await api('/api/cases'); updateStats(); renderCases(); }
-  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="7" class="empty">加载失败: '+e.message+'</td></tr>'; }
+  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="8" class="empty">加载失败: '+e.message+'</td></tr>'; }
 }
 function updateStats() {
   const pass = cases.filter(c => c.status==='PASS').length;
@@ -92,6 +124,7 @@ function renderCases() {
       '<td><b>'+escapeHtml(c.name)+'</b></td>' +
       '<td>'+category(c.name)+'</td>' +
       '<td>'+badge(c.status)+'</td>' +
+      '<td class="mono" style="font-size:11px;color:var(--text-3)">'+fmtDateTime(c.started_at)+'</td>' +
       '<td class="mono">'+dur+'</td>' +
       '<td><div class="truncate" title="'+input+'">'+input+'</div></td>' +
       '<td><button class="del-btn" onclick="event.stopPropagation();deleteCase('+c.id+')">删除</button></td>' +
@@ -131,8 +164,11 @@ async function deleteSelectedCases() {
   const ids = [...selectedCaseIds];
   if (!ids.length) return;
   if (!confirm('确认删除所选 '+ids.length+' 条记录？\n对应的报告和截图将一并从磁盘删除，不可恢复。')) return;
+  // 删库+清磁盘文件+刷新列表都要时间，等待框期间禁止再点（finally 保证一定消失）
+  showBusy('正在删除 '+ids.length+' 条记录…');
+  let r = null, err = null;
   try {
-    const r = await api('/api/cases/delete-batch', {
+    r = await api('/api/cases/delete-batch', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ids})
     });
@@ -142,13 +178,34 @@ async function deleteSelectedCases() {
     if (sa) sa.checked = false;
     if (sah) sah.checked = false;
     await loadCases();
-    alert('已删除 '+r.deleted.length+' 条记录，清理磁盘文件 '+r.removed_files+' 个' +
-          (r.missing.length ? '（'+r.missing.length+' 条已不存在）' : ''));
-  } catch(e) { alert('批量删除失败: '+e.message); }
+  } catch(e) { err = e; }
+  finally { hideBusy(); }
+  if (err) { alert('批量删除失败: '+err.message); return; }
+  alert('已删除 '+r.deleted.length+' 条记录，清理磁盘文件 '+r.removed_files+' 个' +
+        (r.missing.length ? '（'+r.missing.length+' 条已不存在）' : ''));
+}
+
+// 报告文件丢了/内容对不上时，从数据库记录重新渲染一份。
+// 步骤、断言、证据路径都在库里，报告只是这些数据的 Markdown 视图。
+async function rebuildReport(id) {
+  if (!id) return;
+  if (!confirm('用数据库里的记录重新生成这份报告？\n\n'
+    + '（报告若还被其它记录共用，会自动另存一份，不会覆盖别人的）')) return;
+  showBusy('正在重建报告…');
+  let err = null;
+  try {
+    await api('/api/cases/' + id + '/rebuild-report', { method: 'POST' });
+  } catch (e) { err = e; }
+  hideBusy();
+  if (err) { alert('重建报告失败: ' + err.message); return; }
+  await openCase(id);     // 刷新详情里的报告路径
+  await loadCases();      // 列表里也可能显示报告状态
 }
 
 async function deleteCase(id) {
   if (!confirm('确认删除这条测试记录？\n对应的报告和截图将一并从磁盘删除，不可恢复。')) return;
+  showBusy('正在删除记录…');
+  let err = null;
   try {
     await api('/api/cases/'+id, {method:'DELETE'});
     selectedCaseIds.delete(id);
@@ -156,7 +213,9 @@ async function deleteCase(id) {
     cases = cases.filter(c => c.id !== id);
     updateStats(); renderCases();
     if (currentCaseId === id) closeDetail();
-  } catch(e) { alert('删除失败: '+e.message); }
+  } catch(e) { err = e; }
+  finally { hideBusy(); }
+  if (err) alert('删除失败: '+err.message);
 }
 
 function renderActions(actions) {
@@ -188,6 +247,7 @@ async function openCase(id) {
   if (c.started_at) html += '<div class="row"><span class="label">执行时间</span><span class="value mono">'+c.started_at.replace('T',' ')+'</span></div>';
   if (c.finished_at) html += '<div class="row"><span class="label">结束时间</span><span class="value mono">'+c.finished_at.replace('T',' ')+'</span></div>';
   if (c.device) html += '<div class="row"><span class="label">设备</span><span class="value mono">'+escapeHtml(c.device)+'</span></div>';
+  if (c.package) html += '<div class="row"><span class="label">被测 App</span><span class="value mono">'+escapeHtml(c.package)+'</span></div>';
   if (c.script_path) html += '<div class="row"><span class="label">脚本路径</span><span class="value mono">'+escapeHtml(c.script_path)+'</span></div>';
   if (c.report_path) html += '<div class="row"><span class="label">报告</span><span class="value mono ev-link" data-ev="'+encodeURIComponent(c.report_path)+'">'+escapeHtml(c.report_path)+'</span></div>';
   html += '</div>';
@@ -265,8 +325,13 @@ function renderScripts() {
       '<td><div class="truncate" title="'+desc+'">'+escapeHtml(firstLine(s.description))+'</div></td>' +
       '<td class="mono" style="text-align:center">'+(s.steps||0)+'</td>' +
       '<td class="mono" style="font-size:11px;color:var(--text-3)">'+fmtTime(s.mtime)+'</td>' +
-      '<td style="display:flex;gap:6px">' +
-        '<button class="del-btn" onclick="event.stopPropagation();deleteScript(\''+encodeURIComponent(s.name)+'\')">删除</button>' +
+      // 注意：flex 必须放在 td 内部的 div 上。直接给 <td> 加 display:flex 会让它
+      // 脱离表格布局，浏览器补一个匿名单元格，底边框就会跑到按钮下方、且宽度
+      // 不再是这一列 —— 表现出来就是"删除按钮下面多了一条线"。
+      '<td>' +
+        '<div style="display:flex;gap:6px">' +
+          '<button class="del-btn" onclick="event.stopPropagation();deleteScript(\''+encodeURIComponent(s.name)+'\')">删除</button>' +
+        '</div>' +
       '</td>' +
     '</tr>';
   }).join('');
@@ -305,12 +370,16 @@ async function saveScript() {
 async function deleteScript(nameEnc) {
   const name = decodeURIComponent(nameEnc);
   if (!confirm('确认删除用例脚本「'+name+'」？\n（仅删除脚本文件，不影响历史测试记录与截图）')) return;
+  showBusy('正在删除用例脚本…');
+  let err = null;
   try {
     await api('/api/scripts/'+encodeURIComponent(name), {method:'DELETE'});
     scripts = scripts.filter(s => s.name !== name);
     renderScripts();
     if (currentScriptName === name) closeScript();
-  } catch(e) { alert('删除失败: '+e.message); }
+  } catch(e) { err = e; }
+  finally { hideBusy(); }
+  if (err) alert('删除失败: '+err.message);
 }
 function newScript() {
   const name = prompt('新建用例（按包名分目录，如 com.zui.calendar/175.py）:');

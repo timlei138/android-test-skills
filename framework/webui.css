@@ -125,8 +125,30 @@ main { flex: 1; min-width: 0; padding: 24px 28px 32px; overflow-y: auto; backgro
 .del-btn {
   background: transparent; border: 1px solid var(--line); border-radius: 6px;
   color: var(--text-3); padding: 4px 8px; font-size: 12px; cursor: pointer;
+  /* 列宽有限时按钮文字会被压成"删/除"两行，锁死不换行 + flex 里不收缩 */
+  white-space: nowrap; flex: none;
 }
 .del-btn:hover { border-color: var(--fail); color: var(--fail); background: var(--fail-dim); }
+
+/* ── 等待框（删除等耗时操作）── 盖住详情面板，阻止误点 */
+.busy {
+  position: fixed; inset: 0; z-index: 200;
+  display: grid; place-items: center;
+  background: rgba(17,24,39,0.38);
+}
+.busy-box {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 30px; min-width: 180px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.22);
+}
+.spinner {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: 3px solid var(--line); border-top-color: var(--accent);
+  animation: busy-spin .8s linear infinite;
+}
+@keyframes busy-spin { to { transform: rotate(360deg); } }
+.busy-text { font-size: 13px; color: var(--text-2); white-space: nowrap; }
 
 .empty { color: var(--text-3); text-align: center; padding: 50px 20px; }
 
@@ -138,8 +160,11 @@ main { flex: 1; min-width: 0; padding: 24px 28px 32px; overflow-y: auto; backgro
 .detail-scroll { flex: 1; overflow-y: auto; padding: 24px 28px; }
 .detail-head { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); background: var(--panel); }
 .detail-head h2 { margin: 0; font-size: 16px; flex: 1; }
-.btn-delete { background: transparent; border: 1px solid var(--fail); border-radius: 7px; color: var(--fail); padding: 6px 12px; font-size: 12px; cursor: pointer; }
+.btn-delete { background: transparent; border: 1px solid var(--fail); border-radius: 7px; color: var(--fail); padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; flex: none; }
 .btn-delete:hover { background: var(--fail-dim); }
+
+.btn-ghost { background: transparent; border: 1px solid var(--line); border-radius: 7px; color: var(--text-2); padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap; flex: none; }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); background: var(--hover); }
 
 .user-input-card {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 14px 0;
