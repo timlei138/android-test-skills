@@ -1,6 +1,6 @@
 # 通用系统界面（权限弹窗 / 系统对话框）—— 兜底卡
 
-<!-- 本卡是前台包名不在任何 App 卡时的兜底注入。机器只阅读，不 parse。 -->
+<!-- 本卡是前台包名不在任何 App 卡时的兜底参考（AI 主动检索加载，非框架自动注入）。机器只阅读，不 parse。 -->
 
 - **app**: `_system`（兜底卡，不可删除）
 - 适用包名: `com.android.permissioncontroller`、`com.google.android.permissioncontroller`、`com.android.systemui`、`android`

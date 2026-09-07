@@ -79,7 +79,7 @@ def run():
 
     # ── Step2 手动创建课程表 → 进入新建页 ─────────────────────
     t.step("Step2 点击手动创建课程表")
-    if not t.tap_rid(BTN_MANUAL):
+    if not t.tap_rid(BTN_MANUAL, silent=True):
         t.record("FAIL", "未找到手动创建课程表按钮")
         return t.finish()
     time.sleep(2)
@@ -95,14 +95,14 @@ def run():
     # ── Step3 填名+完成 → 空课表周视图 ──────────────────────────
     # 注：et_schedule_name 默认空且必填，用例未明示填名但产品要求；填入测试名。
     t.step("Step3 填名称+完成 → 进入空课表周视图")
-    if not t.tap_rid(NAME_RID):
+    if not t.tap_rid(NAME_RID, silent=True):
         t.record("FAIL", "未找到名称输入框")
         return t.finish()
     time.sleep(0.8)
     t.input_text(NAME_RID, "测试课程表")
     time.sleep(0.6)
     # toolbar 右侧 action_save；不按 back（避免退出页面）
-    if not t.tap_rid(SAVE_RID):
+    if not t.tap_rid(SAVE_RID, silent=True):
         t.record("FAIL", "未找到保存按钮(action_save)")
         return t.finish()
     time.sleep(3)
@@ -200,8 +200,8 @@ def run():
                 t.record("WARN", f"课程背景色: 视觉数色调用失败 {e}")
         else:
             t.record("FAIL", "未找到色板 customPanel 节点")
-        # 关闭色板
-        t.tap_text("取消", wait=3)
+        # 关闭色板（收尾动作，失败不影响断言；后续 Step6 验证页面状态）
+        t.tap_text("取消", wait=3, silent=True)
         time.sleep(1.2)
 
     # ── Step6 back 关闭编辑页 → 回周视图 ─────────────────────────

@@ -183,15 +183,17 @@ def _scenarios_dirs():
     ws = os.environ.get("DSH_ANDROID_TEST_DIR")
 
     # skill 包：同理不能只靠 pkg —— 工作区副本会指到自己。
-    # 用安装位置（~/.agents/skills/android-gui-testing）作为稳定锚点兜底。
+    # 锚点优先级：显式环境变量 DSH_SKILL_DIR（run_case.ps1/webui.ps1 会设置，
+    # 也支持自定义安装位置）> 默认安装位置（~/.agents/skills/android-gui-testing）。
+    # 环境变量是用户显式声明的意图，必须排在硬编码默认值前面。
     anchors = []
+    env_pkg = os.environ.get("DSH_SKILL_DIR")
+    if env_pkg:
+        anchors.append(os.path.join(env_pkg, "knowledge", "scenarios"))
     home = os.path.expanduser("~")
     if home and home != "~":
         anchors.append(os.path.join(home, ".agents", "skills", "android-gui-testing",
                                     "knowledge", "scenarios"))
-    env_pkg = os.environ.get("DSH_SKILL_DIR")
-    if env_pkg:
-        anchors.append(os.path.join(env_pkg, "knowledge", "scenarios"))
     anchors.append(os.path.join(pkg, "knowledge", "scenarios"))
 
     cands = []

@@ -23,7 +23,6 @@
 """
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -111,6 +110,10 @@ def tap_rightmost_icon(t):
 
 
 def _sleep(s=1.0):
+    """settle 等待（非等 UI 元素）：固定值为真机调优结果，等待
+    App 冷启动完成 / 页面转场 / PhotoPicker 渲染等无元素信号的 settle。
+    等元素出现一律用 t.wait_rid / t.wait_text，不要往这里加 sleep。
+    保留理由见 SKILL.md 注意事项（既有链路 sleep 属 settle 型）。"""
     time.sleep(s)
 
 
@@ -141,11 +144,12 @@ def _tap_if_present(t, text, wait=3):
     """存在才点，不存在静默跳过。
 
     权限弹窗/提示框可能已被看门狗提前处理掉，此时 tap_text 找不到目标会记一条
-    WARN，把环境噪音算进用例结论（175 探查实测到 '全部允许' 误报）。先判存再点。
+    WARN，把环境噪音算进用例结论（175 探查实测到 '全部允许' 误报）。先判存再点；
+    点击阶段也 silent：wait 命中后元素若被看门狗抢先点掉，tap 落空属于预期，
+    不记 WARN，直接返回 False 交由外层逻辑兜底。
     """
     if t.wait_text(text, timeout=wait):
-        t.tap_text(text, wait=2)
-        return True
+        return t.tap_text(text, wait=2, silent=True)
     return False
 
 
@@ -154,13 +158,10 @@ def restart_calendar(t, pm_clear=True):
     if pm_clear:
         t.pm_clear(PKG)
         _sleep(1.2)
-    subprocess.run(["adb", "shell", "am", "force-stop", PKG],
-                   capture_output=True)
+    t.force_stop(PKG)
     _sleep(0.8)
-    subprocess.run(["adb", "shell", "monkey", "-p", PKG,
-                    "-c", "android.intent.category.LAUNCHER", "1"],
-                   capture_output=True)
-    time.sleep(4)
+    t.launch_app(PKG)
+    time.sleep(4)    # settle：等冷启动首帧 + 首启权限弹窗（无 rid 可条件等待）
     t.dismiss_first_use_dialogs(policy="allow", max_rounds=12, verbose=False)
     _sleep(1.5)
     return True
@@ -174,7 +175,7 @@ def goto_课程表空状态(t, pm_clear=True):
         t.blocked("无法打开'更多'菜单")
         return False
     _sleep(1.5)
-    if not t.tap_text("课程表", wait=4):
+    if not t.tap_text("课程表", wait=4, silent=True):
         t.blocked("未找到'课程表'入口")
         return False
     _sleep(3)
@@ -188,7 +189,7 @@ def goto_手动创建课程表(t, pm_clear=True):
     """课程表空状态 → 手动创建课程表页。"""
     if not goto_课程表空状态(t, pm_clear=pm_clear):
         return False
-    if not t.tap_rid(BTN_CREATE_MANUALLY):
+    if not t.tap_rid(BTN_CREATE_MANUALLY, silent=True):
         t.blocked("未找到'手动创建课程表'按钮")
         return False
     _sleep(3)
@@ -228,7 +229,7 @@ def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_i
                 "-d", "file:///sdcard/Pictures/日历/课程表.png")
     _sleep(2)
 
-    if not t.tap_rid(BTN_GALLERY):
+    if not t.tap_rid(BTN_GALLERY, silent=True):
         t.blocked("未找到'从图库导入课程表'按钮")
         return False
     _sleep(2)
@@ -286,14 +287,12 @@ def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_i
 
 def navigate_to_course_table(t):
     """启动 App + 处理首启弹窗 + 导航到课程表空状态页"""
-    # 确保干净前台：杀掉日历和相机（上个用例可能停在相机）
-    subprocess.run(["adb", "shell", "am", "force-stop", PKG], capture_output=True)
-    subprocess.run(["adb", "shell", "am", "force-stop", "com.zui.camera"],
-                   capture_output=True)
-    time.sleep(1)
-    subprocess.run(["adb", "shell", "monkey", "-p", PKG,
-                    "-c", "android.intent.category.LAUNCHER", "1"],
-                   capture_output=True)
+    # 确保干净前台：杀掉日历和相机（上个用例可能停在相机）。
+    # 一律走 t.force_stop/t.launch_app：绑定用例 serial，多设备不串台
+    t.force_stop(PKG)
+    t.force_stop("com.zui.camera")
+    time.sleep(1)    # settle：等进程退出（非 UI 信号，无法条件等待）
+    t.launch_app(PKG)
     # 等 App 就绪（有弹窗或有主界面工具栏），最多 10s
     for _ in range(10):
         texts = t.screen_text()
@@ -306,7 +305,7 @@ def navigate_to_course_table(t):
     if not tap_more_menu(t, retries=10):
         print("[导航] 更多菜单未弹出（无'课程表'项）, 屏幕:", t.screen_text()[:6])
         return False
-    t.tap_text("课程表")
+    t.tap_text("课程表", silent=True)
     for _ in range(10):
         if any("拍照导入" in x for x in t.screen_text()):
             return True
@@ -325,7 +324,9 @@ def _dismiss_image_hint(t, timeout=8):
     for _ in range(int(timeout / 0.5)):
         texts = t.screen_text()
         if any("知道了" in x for x in texts):
-            t.tap_text("知道了", wait=2)
+            # silent：screen_text 命中与点击之间看门狗可能抢先关框，tap 落空
+            # 属预期（框已不在），不记 WARN，照常按"框已关"返回 True。
+            t.tap_text("知道了", wait=2, silent=True)
             time.sleep(0.6)
             return True
         # 框没出现（或已消失）→ 可能直接进了系统权限弹窗/相机
@@ -339,7 +340,7 @@ def _dismiss_image_hint(t, timeout=8):
 def test_camera(t, allow):
     """相机权限: allow=True 期望相机打开; allow=False 期望提示授予权限"""
     t.watchdog_policy("allow" if allow else "deny")
-    t.tap_text("拍照导入课程表")
+    t.tap_text("拍照导入课程表", silent=True)   # 失败由下方 Activity/文案断言兜底
     _dismiss_image_hint(t)          # 挡路框必须先关，否则相机不会被拉起
     if allow:
         act = ""
@@ -364,7 +365,7 @@ def test_camera(t, allow):
 def test_gallery(t, allow):
     """图库权限: allow=True 期望进入照片选择; allow=False 期望提示授予权限"""
     t.watchdog_policy("allow" if allow else "deny")
-    t.tap_text("从图库导入课程表")
+    t.tap_text("从图库导入课程表", silent=True)  # 失败由下方 Activity/文案断言兜底
     _dismiss_image_hint(t)          # 挡路框必须先关，否则相册不会被拉起
     if allow:
         act = ""

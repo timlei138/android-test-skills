@@ -106,7 +106,7 @@ def run():
         t.record("FAIL", "未进入手动创建页")
         return t.finish()
     time.sleep(2)
-    if not t.tap_rid(TIME_SETTINGS_RID):
+    if not t.tap_rid(TIME_SETTINGS_RID, silent=True):
         t.record("FAIL", "未找到课程时间设置入口")
         return t.finish()
     time.sleep(2.5)
@@ -127,12 +127,12 @@ def run():
     cur = ocr_value_at(t, COL_END_MIN_X, ROW_Y - 60, ROW_Y + 60)
     t.record("PASS" if cur == 53 else "FAIL",
              f"上午第1节结束分钟={cur}（预期 53）")
-    if not t.tap_text("确定", wait=3):
+    if not t.tap_text("确定", wait=3, silent=True):
         t.record("FAIL", "第1节确定未生效")
         return t.finish()
     time.sleep(2)
     # 自动调整 dialog
-    t.tap_text("确定", wait=3)
+    t.tap_text("确定", wait=3, silent=True)
     time.sleep(2)
     t.observe_dialogs(rounds=3)
 
@@ -170,13 +170,13 @@ def run():
     cur_h = ocr_value_at(t, COL_END_HOUR_X, ROW_Y - 60, ROW_Y + 60)
     t.record("PASS" if cur_h == 14 else "FAIL",
              f"上午第4节结束小时={cur_h}（预期 14）")
-    if not t.tap_text("确定", wait=3):
+    if not t.tap_text("确定", wait=3, silent=True):
         t.record("FAIL", "第4节确定未生效")
         return t.finish()
     time.sleep(2)
     t.observe_dialogs(rounds=3)
     # 改后续小节也可能触发"是否自动调整其他课程"对话框 → 关掉它
-    t.tap_text("确定", wait=3)
+    t.tap_text("确定", wait=3, silent=True)
     time.sleep(2)
     t.observe_dialogs(rounds=3)
     t.screenshot("179_冲突设置页")
@@ -193,7 +193,7 @@ def run():
         if b:
             t.tap_xy(b[0] + 61, b[1] + 31, observe=False)
         else:
-            t.tap_text("完成", wait=3, observe=False)
+            t.tap_text("完成", wait=3, observe=False, silent=True)
         # 真实文案「课程时间有冲突，无法设置」来自探索期连拍记录（storage/179_toast_tap/v3_*.png），
         # toast 窗口实测 ~2-3s，动作后立即 capture_toast（截屏定格→OCR）
         texts, _shot = t.capture_toast(wait=1.0, label="179_完成_toast")

@@ -23,8 +23,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)), "framew
 
 from test_framework import TestCase          # noqa: E402
 
-# 被测 App 包名（改这里）
-PKG = "com.zui.calendar"
+# 被测 App 包名（改这里；本模板是通用骨架，勿提交硬编码包名的副本）
+PKG = "com.example.app"
 
 # ========== 全新 App 无 _flow 的起步方式（二选一，有 _flow 直接跳过） ==========
 # from test_framework import TestCase
@@ -45,19 +45,25 @@ def collect():
     # if not goto_xxx(t, ...):
     #     return t.finish()
     t.d.app_start(PKG)                         # 模板默认：无 _flow 时冷启动起步
+    # 等首页渲染（首帧未就绪时 dump 会误判“无弹窗/空白页”；
+    # 冷启动渲染时长机型差异大，采集场景固定等 2s 即可）
     time.sleep(2)
 
     # ── 未知下钻：一轮一跳 ─────────────────────────────────────
-    # 1) 当前页先落盘：info = t.probe_page("页面A")  打印摘要
-    # 2) 看摘要里可交互项，挑下一跳文本追加一行：
-    #        if not t.tap_text("下一跳入口", wait=4): print("没找到，检查上一步摘要")
+    # 1) 当前页先落盘：info = t.probe_page("页面A")  打印摘要。
+    #    探系统页（PhotoPicker 等）时必须传被测包名，否则缓存散到系统包名下：
+    #        info = t.probe_page("照片选择器", pkg=PKG)
+    # 2) 看摘要里可交互项，挑下一跳文本追加一行（tap_* 返回 bool，守卫真的会触发；
+    #    silent=True 避免守卫分支与框架 WARN 双重记录）：
+    #        if not t.tap_text("下一跳入口", wait=4, silent=True):
+    #            print("没找到，检查上一步摘要")
     # 3) 再 probe_page("页面B") → 如此推进；每轮真机 2-5s
     # 4) 关键动作（保存/提交/改配置后确定等）后立即抓反馈落盘——
     #    探索要走完业务闭环，动态文案（toast）必须此刻记录，用例期不许猜：
-    #        t.tap_text("完成")
-    #        texts, shot = t.capture_toast()        # 截屏 OCR，截图自动留证
+    #        t.tap_text("完成", silent=True)
+    #        texts, shot = t.capture_toast()        # 截屏定格帧 OCR，截图自动留证
     #        print("动作后 toast/屏面文本:", texts)
-    info = t.probe_page("页面A")               # ← 首跳：把"页面A"换成语义名
+    info = t.probe_page("页面A", pkg=PKG)         # ← 首跳：把"页面A"换成语义名
     print("页面A texts:", info["texts"][:30])
     print("页面A rids :", info["rids"][:30])
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Android GUI 测试框架：元素操作、断言、截图、Toast 捕捉、置灰判断、报告生成
-依赖: uiautomator2 (venv 3.9) + rapidocr (venv313) — 本框架运行在 .venv (u2) 环境
+依赖: Python 3.10+（str | None 语法）+ uiautomator2 + rapidocr_onnxruntime
 """
 import io
 import os
@@ -229,6 +229,18 @@ class TestCase:
                 # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
                 print(f"⚠️ [db] 用例入库失败（测试继续，但本次执行无记录）: {e}")
                 self._db = None
+        # 中途异常也能出报告：实例一创建就登记（run_case.py 异常兜底取它补
+        # finish()；否则"跑一半崩了" = 无报告 + DB 里永远没 finished_at 的悬挂记录）。
+        # finish() 时会再次登记（幂等，以完成者为准）。
+        global LAST_CASE
+        LAST_CASE = self
+        # 执行异常标记（run_case.py 捕获非 CaseAbort 异常时设置）：
+        # 存在时最终结论按 ERROR（用例没跑完，结论不可信，需人工介入）
+        self._fatal_error = None
+        # finish() 幂等守卫：正常收尾后置位；run_case.py 异常兜底再调
+        # finish() 时直接返回旧报告，不重复"备份旧报告+二次写库"
+        self._finished = False
+        self._report_path = None
 
     # ── 设备命令（统一带 serial，多设备时不会操作错机器）─────────────
     def _adb(self, *args):
@@ -309,8 +321,7 @@ class TestCase:
     def _vision_crop_bytes(self, rid=None, bounds=None):
         """截取屏幕（或裁剪到元素区域），返回 PNG 字节。
         优先按元素 bounds 裁剪：聚焦目标、省 token、判断更准。"""
-        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                             capture_output=True).stdout
+        raw = self._screencap_bytes()
         if not (rid or bounds):
             return raw
         b = bounds
@@ -632,49 +643,55 @@ class TestCase:
         return self.record("BLOCKED", f"阻塞: {reason}")
 
     # ── 元素操作 ────────────────────────────────────────────────────
-    def _el(self, rid=None, text=None):
-        if rid:
-            return self.d.xpath(f'//*[@resource-id="{rid}"]')
-        if text:
-            return self.d(text=text)
-        raise ValueError("需要 rid 或 text")
+    # 旧 _el() 已删：xpath 选择器通道已废弃，定位统一走 el_bounds/_parse_nodes
 
-    def tap_rid(self, rid, observe=True):
-        """点 resource-id 元素。observe=False：跳过弹窗检查/截图/延迟，
-        用于触发后需立即抓 toast 的动作（默认链的弹窗检查会占满 toast 显示窗口）。"""
-        t0 = time.time()
-        self._el(rid=rid).click()
-        if not observe:               # 触发后要立即抓 toast/浮层：跳过检查窗口，不延迟不截图
-            self._log_action("tap", f"rid={rid} observe=False", t0)
-            return self
-        time.sleep(ACTION_DELAY)
-        self._check_dialogs_after_action()
-        self._log_action("tap", f"rid={rid}", t0)
-        self._auto_screenshot(f"点击_{rid}")
-        return self
-
-    def tap_text(self, text, wait=5.0, observe=True):
-        """点文字按钮；元素未出现时轮询等待（防导航/时序抖动）。
-        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
-        for _ in range(int(wait / 0.5)):
-            try:
-                if self.d(text=text).click_exists(timeout=0.3):
-                    t0 = time.time()
-                    if not observe:   # 要立即抓 toast：跳过检查窗口
-                        self._log_action("tap", f"text={text} observe=False", t0)
-                        return self
-                    time.sleep(ACTION_DELAY)
-                    self._check_dialogs_after_action()
-                    self._log_action("tap", f"text={text}", t0)
-                    self._auto_screenshot(f"点击_{text}")
-                    return self
-            except Exception:
-                pass
+    # ── 统一动作基元 ──────────────────────────────────────────────
+    # 所有 tap_* 收敛到同一条"轮询定位 → 点击 → 确认"通道，共享同一份契约：
+    #   * 返回 bool：True=已点到，False=超时未找到（不再返回 self，链式调用已废弃）
+    #   * 找不到元素不抛异常（旧 tap_rid 直接崩、退出码 3 的行为已移除），
+    #     默认记一条 WARN；silent=True 时不记（调用方有自己的 FAIL/BLOCKED 分支，
+    #     避免"守卫触发 + WARN 兜底"双重记录）
+    #   * observe=False：跳过弹窗检查窗口/截图/延迟，用于"触发后立即抓 toast"
+    #     的动作（默认链会占满 toast 的 ~2s 显示窗口）
+    #   * 轮询期间每次 dump 都顺带驱动弹窗看门狗（与 wait_* 行为一致）
+    def _tap_unified(self, rid=None, text=None, desc=None, wait=5.0,
+                     observe=True, silent=False):
+        """统一点击通道：轮询定位 → 点击 → 确认。返回 bool。"""
+        kind = "rid" if rid else ("text" if text else "desc")
+        target = rid or text or desc
+        deadline = time.time() + wait
+        while True:
+            b = self.el_bounds(rid=rid, text=text, desc=desc)
+            if b:
+                t0 = time.time()
+                x1, y1, x2, y2 = b
+                self.d.click((x1 + x2) // 2, (y1 + y2) // 2)
+                if not observe:       # 要立即抓 toast/浮层：跳过检查窗口，不延迟不截图
+                    self._log_action("tap", f"{kind}={target} observe=False", t0)
+                    return True
+                time.sleep(ACTION_DELAY)
+                self._check_dialogs_after_action()
+                self._log_action("tap", f"{kind}={target}", t0)
+                self._auto_screenshot(f"点击_{target}")
+                return True
+            if time.time() >= deadline:
+                break
             time.sleep(0.5)
-        self.record("WARN", f"tap_text 未找到元素: {text!r}")
-        return self
+        if not silent:
+            self.record("WARN", f"tap 未找到元素: {kind}={target!r}")
+        return False
 
-    def tap_text_re(self, pattern, timeout=8.0, clickable=None):
+    def tap_rid(self, rid, wait=5.0, observe=True, silent=False):
+        """点 resource-id 元素（推荐定位方式：rid 稳定、不受文案/多语言影响）。
+        元素未出现时轮询等待（与 tap_text 同一通道、同一份失败语义）。"""
+        return self._tap_unified(rid=rid, wait=wait, observe=observe, silent=silent)
+
+    def tap_text(self, text, wait=5.0, observe=True, silent=False):
+        """点文字按钮；元素未出现时轮询等待（防导航/时序抖动）。
+        text 定位仅用于系统弹窗（无 rid）或文案本身即被测对象的场景。"""
+        return self._tap_unified(text=text, wait=wait, observe=observe, silent=silent)
+
+    def tap_text_re(self, pattern, timeout=8.0, clickable=None, observe=True):
         """按正则点击文字按钮（App 无关；跨 App 通用能力）。
 
         为什么需要它：系统权限弹窗的按钮文案会随状态变化，精确匹配必然失配。
@@ -688,6 +705,7 @@ class TestCase:
         pattern   : 正则（re.search）
         timeout   : 轮询等待上限（秒）
         clickable : True 只点可点击节点；None 不限
+        observe   : False 时跳过点击后的弹窗检查/截图/延迟（抓 toast 场景）
         返回命中的文案；未命中返回 ""（不记 WARN，交由调用方判断）
         """
         deadline = time.time() + timeout
@@ -703,9 +721,16 @@ class TestCase:
                 if not b:
                     continue
                 t0 = time.time()
-                self.tap_xy((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
-                self._log_action("tap", f"text_re={pattern} -> {n['text']!r}", t0)
-                self._auto_screenshot(f"点击_{n['text']}")
+                self.d.click((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+                if observe:
+                    # 不走 tap_xy：那会重复记录操作日志+截图（双重留证）。
+                    # 这里的观察链与 _tap_unified 保持同一形状。
+                    time.sleep(ACTION_DELAY)
+                    self._check_dialogs_after_action()
+                    self._log_action("tap", f"text_re={pattern} -> {n['text']!r}", t0)
+                    self._auto_screenshot(f"点击_{n['text']}")
+                else:
+                    self._log_action("tap", f"text_re={pattern} -> {n['text']!r} observe=False", t0)
                 return n["text"]
             time.sleep(0.4)
         return ""
@@ -722,96 +747,106 @@ class TestCase:
                 return n["bounds_xy"]
         return None
 
-    def tap_el(self, rid=None, text=None, desc=None, xpath=None, wait=5.0, observe=True):
+    def tap_el(self, rid=None, text=None, desc=None, xpath=None, wait=5.0,
+               observe=True, silent=False):
         """按 资源id/文字/内容描述/xpath 点击（元素定位优先，坐标兜底）。
-        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
-        for _ in range(int(wait / 0.5)):
-            b = self.el_bounds(rid=rid, text=text, desc=desc)
-            if b:
-                t0 = time.time()
-                x1, y1, x2, y2 = b
-                self.d.click((x1 + x2) // 2, (y1 + y2) // 2)
-                if not observe:       # 要立即抓 toast：跳过检查窗口
-                    self._log_action("tap", f"bounds=({x1},{y1},{x2},{y2}) observe=False", t0)
-                    return self
-                time.sleep(ACTION_DELAY)
-                self._check_dialogs_after_action()
-                self._log_action("tap", f"bounds=({x1},{y1},{x2},{y2})", t0)
-                self._auto_screenshot(f"点击_{rid or text or desc}")
-                return self
-            time.sleep(0.5)
-        self.record("WARN", f"tap_el 未找到元素: rid={rid} text={text} desc={desc}")
-        return self
-
-    def tap_desc(self, desc, wait=5.0, observe=True):
-        """按 content-desc 点击（图标按钮常用）。
-        observe=False：跳过弹窗检查/截图/延迟，用于触发后需立即抓 toast 的动作。"""
-        return self.tap_el(desc=desc, wait=wait, observe=observe)
+        xpath 参数当前未实现（el_bounds 不支持 xpath），传了也按 rid/text/desc 走。"""
+        return self._tap_unified(rid=rid, text=text, desc=desc, wait=wait,
+                                 observe=observe, silent=silent)
+    
+    def tap_desc(self, desc, wait=5.0, observe=True, silent=False):
+        """按 content-desc 点击（图标按钮常用）。"""
+        return self._tap_unified(desc=desc, wait=wait, observe=observe, silent=silent)
 
     # ── 必需操作（强语义）：找不到元素 = FAIL 并中止用例 ─────────────
     # tap_* 系列失败只记 WARN（可选步骤用）；链路关键步骤用 require_*，
     # 防止"元素没找到但后面忘了断言"导致的假通过。
+    # 实现统一为"轮询内直接点击"（tap_* 的 silent 模式）：旧实现"先 wait 后 tap"
+    # 两步之间存在竞态窗口（wait 命中后元素消失 → tap 降级 WARN 或裸崩），
+    # 与"必需操作失败 = FAIL 中止"的契约冲突。
     def require_tap_text(self, text, wait=8.0, msg=None):
         """必须点到指定文字的元素；等不到记 FAIL 并抛 CaseAbort 中止用例。"""
-        if not self.wait_text(text, timeout=wait):
+        if not self.tap_text(text, wait=wait, silent=True):
             self.record("FAIL", msg or f"必需元素未出现: text={text!r}，用例中止")
             raise CaseAbort(f"require_tap_text({text!r}) 超时")
-        return self.tap_text(text, wait=2)
+        return True
 
     def require_tap_rid(self, rid, wait=8.0, msg=None):
         """必须点到指定 resource-id 的元素；等不到记 FAIL 并抛 CaseAbort。"""
-        if not self.wait_rid(rid, timeout=wait):
+        if not self.tap_rid(rid, wait=wait, silent=True):
             self.record("FAIL", msg or f"必需元素未出现: rid={rid!r}，用例中止")
             raise CaseAbort(f"require_tap_rid({rid!r}) 超时")
-        return self.tap_rid(rid)
+        return True
 
     def require_tap_el(self, rid=None, text=None, desc=None, wait=8.0, msg=None):
         """必须点到元素（rid/text/desc 任一）；等不到记 FAIL 并抛 CaseAbort。"""
-        deadline = time.time() + wait
-        while True:
-            if self.el_bounds(rid=rid, text=text, desc=desc):
-                return self.tap_el(rid=rid, text=text, desc=desc, wait=2)
-            if time.time() >= deadline:
-                self.record("FAIL", msg
-                            or f"必需元素未出现: rid={rid} text={text} desc={desc}，用例中止")
-                raise CaseAbort(f"require_tap_el({rid or text or desc!r}) 超时")
-            time.sleep(0.5)
+        if not self.tap_el(rid=rid, text=text, desc=desc, wait=wait, silent=True):
+            self.record("FAIL", msg
+                        or f"必需元素未出现: rid={rid} text={text} desc={desc}，用例中止")
+            raise CaseAbort(f"require_tap_el({rid or text or desc!r}) 超时")
+        return True
 
     def tap_xy(self, x, y, observe=True):
-        """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）。
+        """坐标点击（最后手段；优先用 tap_el/tap_text/tap_rid）。返回 True
+        （坐标点击不存在"找不到元素"，与 tap_* 统一 bool 契约，不再返回 self 链式）。
         observe=False：跳过弹窗检查窗口/截图/延迟 —— 用于"触发后要立即抓 toast"
         的动作（tap 默认链的弹窗检查会占满 toast 的 ~2s 显示窗口，导致抓空）。"""
         t0 = time.time()
         self.d.click(x, y)
         if not observe:
             self._log_action("tap", f"x={x}, y={y} observe=False", t0)
-            return self
+            return True
         time.sleep(ACTION_DELAY)
         self._check_dialogs_after_action()
         self._log_action("tap", f"x={x}, y={y}", t0)
         self._auto_screenshot(f"点击坐标_{x}_{y}")
-        return self
+        return True
 
-    def input_text(self, rid, text):
-        t0 = time.time()
-        self._el(rid=rid).click()
-        time.sleep(ACTION_DELAY)
-        self.d.send_keys(text)
-        time.sleep(ACTION_DELAY)
-        self._check_dialogs_after_action()
-        self._log_action("input", f"rid={rid}, text={text}", t0)
-        self._auto_screenshot(f"输入_{rid}_{text[:10]}")
-        return self
+    def input_text(self, rid, text, wait=5.0, silent=False):
+        """点输入框并输入文本（与 tap_* 同一契约：轮询定位，返回 bool）。
+        找不到输入框时默认记 WARN；silent=True 时不记（调用方有自己的
+        FAIL/BLOCKED 守卫分支时用，避免双重记录）。"""
+        deadline = time.time() + wait
+        while True:
+            b = self.el_bounds(rid=rid)
+            if b:
+                t0 = time.time()
+                self.d.click((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+                time.sleep(ACTION_DELAY)
+                self.d.send_keys(text)
+                time.sleep(ACTION_DELAY)
+                self._check_dialogs_after_action()
+                self._log_action("input", f"rid={rid}, text={text}", t0)
+                self._auto_screenshot(f"输入_{rid}_{text[:10]}")
+                return True
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        if not silent:
+            self.record("WARN", f"input_text 未找到输入框: rid={rid!r}")
+        return False
 
-    def clear_text(self, rid):
-        t0 = time.time()
-        self._el(rid=rid).click()
-        time.sleep(ACTION_DELAY)
-        self.d.clear_text()
-        time.sleep(ACTION_DELAY)
-        self._log_action("clear", f"rid={rid}", t0)
-        self._auto_screenshot(f"清空_{rid}")
-        return self
+    def clear_text(self, rid, wait=5.0, silent=False):
+        """点输入框并清空内容（与 tap_* 同一契约：轮询定位，返回 bool；
+        silent=True 时找不到不记 WARN）。"""
+        deadline = time.time() + wait
+        while True:
+            b = self.el_bounds(rid=rid)
+            if b:
+                t0 = time.time()
+                self.d.click((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+                time.sleep(ACTION_DELAY)
+                self.d.clear_text()
+                time.sleep(ACTION_DELAY)
+                self._log_action("clear", f"rid={rid}", t0)
+                self._auto_screenshot(f"清空_{rid}")
+                return True
+            if time.time() >= deadline:
+                break
+            time.sleep(0.5)
+        if not silent:
+            self.record("WARN", f"clear_text 未找到输入框: rid={rid!r}")
+        return False
 
     def read_rid(self, rid):
         """读取元素属性字典: text/checked/enabled/selected/clickable/bounds
@@ -914,6 +949,13 @@ class TestCase:
         """强制停止 App"""
         return self.adb_shell("am", "force-stop", package)
 
+    def launch_app(self, package):
+        """冷启动 App（monkey LAUNCHER 入口，已绑定本用例 serial）。
+        用例里禁止裸拼 `adb shell monkey ...`：多设备时会打到 adb 默认选中
+        的那台，与框架"操作、断言、证据锁定同一 serial"的承诺矛盾。"""
+        return self.adb_shell("monkey", "-p", package,
+                              "-c", "android.intent.category.LAUNCHER", "1")
+
     def getprop(self, name):
         """读系统属性，如: getprop('ro.build.type') / getprop('persist.sys.xxx')"""
         return self.adb_shell("getprop", name)
@@ -954,8 +996,7 @@ class TestCase:
     #    都是具体 App 的知识（knowledge/<包名>.md）或 cases/<包名>/_flow.py 的职责。
 
     def _screen_size(self):
-        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                             capture_output=True).stdout
+        raw = self._screencap_bytes()
         return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
 
     def dismiss_first_use_dialogs(self, policy="allow", max_rounds=12, verbose=False):
@@ -1102,6 +1143,12 @@ class TestCase:
         return self._region_contrast(v["bounds"])
 
     # ── 证据与辅助 ──────────────────────────────────────────────────
+    def _screencap_bytes(self):
+        """当前屏幕 PNG 字节（绑定本用例 serial）。截屏统一入口，
+        供 _auto_screenshot / ocr / vision 复用，避免各自裸拼 adb。"""
+        return subprocess.run(self._adb("exec-out", "screencap", "-p"),
+                              capture_output=True).stdout
+
     def _log_action(self, action, detail=None, start=None):
         """记录一步 UI 操作及耗时。start 为操作开始前 time.time()。"""
         duration_ms = 0
@@ -1124,8 +1171,9 @@ class TestCase:
         self._shot_idx += 1
         safe = re.sub(r'[\\/:*?"<>|]', "_", label or "auto")
         path = os.path.join(self.case_dir, f"{self._shot_idx:02d}_{safe}.png")
-        subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                       stdout=open(path, "wb"))
+        raw = self._screencap_bytes()
+        with open(path, "wb") as f:            # 显式关闭：不依赖 CPython 引用计数实现差异
+            f.write(raw)
         if add_to_step and self._cur_step is not None:
             self._cur_step["evidences"].append(path)
             # 步骤级操作截图也入库，供 Web UI 展示
@@ -1145,13 +1193,14 @@ class TestCase:
         return path
 
     def capture_toast(self, wait=1.0, label="toast", y_min=0, y_max=99999):
-        """捕捉 Toast：动作后立即截屏定格 → OCR 读屏 → (文本列表, 截图路径)。
-
+        """捕捉 Toast：动作后立即截屏定格 → OCR 读定格帧 → (文本列表, 截图路径)。
         Toast 是屏幕视觉元素且显示窗口短（~2-3.5s）。logcat 的 Toast 缓冲在
         多数 ROM 上不打印或格式不一，**不可靠 —— 禁止用 logcat 捕 toast**。
         正确姿势（本方法已封装）：
           1. 动作后立即调用（内部等 wait 秒让 toast 渲染，窗口内截屏最稳）
-          2. 截图落盘留证（toast 消失后画面已定格）
+          2. 截屏落盘留证 + OCR 同一帧：旧实现对当前实屏再截一次，
+             RapidOCR 首次冷加载 ~1s 后 toast 可能已消失 → 截图有 toast、
+             OCR 结果却是空（断言用空结果误判 FAIL，证据却证明 toast 在）
           3. OCR 全屏 → 返回文本列表，toast 文案混在其中
         断言示例：
             texts, shot = t.capture_toast()
@@ -1164,7 +1213,9 @@ class TestCase:
         """
         time.sleep(wait)                                    # 等 toast 渲染出来
         path = self._auto_screenshot(label, add_to_step=True)
-        hits = self.ocr(y_min=y_min, y_max=y_max)
+        with open(path, "rb") as f:                         # OCR 读同一份定格帧
+            raw = f.read()
+        hits = self.ocr(y_min=y_min, y_max=y_max, image_bytes=raw)
         return [text for _, _, _, text in hits], path
 
     def screen_text(self):
@@ -1173,15 +1224,16 @@ class TestCase:
         return [n["text"] for n in _parse_nodes(xml) if n["text"]]
 
     # ── OCR（Canvas 内容读取）────────────────────────────────────────
-    def ocr(self, y_min=0, y_max=99999, x_min=0, x_max=99999):
-        """截屏 + rapidocr，返回 [(x, y, conf, text)]（原图像素坐标）"""
+    def ocr(self, y_min=0, y_max=99999, x_min=0, x_max=99999, image_bytes=None):
+        """截屏 + rapidocr，返回 [(x, y, conf, text)]（原图像素坐标）。
+        image_bytes：传入已定格的 PNG 字节时直接 OCR 它（capture_toast 用），
+        不传则现场截屏。"""
         if self._ocr is None:
             from rapidocr_onnxruntime import RapidOCR
             self._ocr = RapidOCR()
         import numpy as np
         from PIL import Image
-        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                             capture_output=True).stdout
+        raw = image_bytes if image_bytes is not None else self._screencap_bytes()
         img = Image.open(io.BytesIO(raw))
         w, h = img.size
         s = 1600 / max(w, h)
@@ -1207,20 +1259,26 @@ class TestCase:
     # 目的：生成用例阶段，同一页面只探一次；后续直接读缓存文件或 grep，
     # 避免"每步 dump + 每步试错"把首次生成拖到 20 分钟。
     # 缓存是纯文本（dump.xml / ocr.json / meta.json），可直接 grep、re 检索。
-    def _probe_dir(self, label):
-        """缓存目录：storage/probes/<包名>/<label>/"""
-        pkg = "unknown"
-        try:
-            pkg = self.d.app_current()["package"] or "unknown"
-        except Exception:
-            pass
+    def _probe_dir(self, label, pkg=None):
+        """缓存目录：storage/probes/<包名>/<label>/。
+
+        pkg=None 时取当前前台包（旧行为）。⚠️ 探查系统页（PhotoPicker、
+        系统设置等）时前台包是系统包，缓存会散到 com.android.* 名下，
+        与"目录名=被测包名"的约定分裂——这种场景应显式传 pkg=被测包名。"""
+        if pkg is None:
+            pkg = "unknown"
+            try:
+                pkg = self.d.app_current()["package"] or "unknown"
+            except Exception:
+                pass
         return os.path.join(PROBE_DIR, pkg, label)
 
-    def cached_dump(self, label, ttl=None, refresh=False):
+    def cached_dump(self, label, ttl=None, refresh=False, pkg=None):
         """取 UI 树，优先读缓存。
         ttl: 缓存有效期（秒），None=永不过期；refresh=True 强制重探。
+        pkg: 归属包名（探查系统页时显式传被测包，避免缓存散到系统包名下）。
         """
-        d = self._probe_dir(label)
+        d = self._probe_dir(label, pkg=pkg)
         fp = os.path.join(d, "dump.xml")
         if not refresh and os.path.isfile(fp):
             if ttl is None or (time.time() - os.path.getmtime(fp)) < ttl:
@@ -1237,10 +1295,10 @@ class TestCase:
             f.write(xml)
         return xml
 
-    def cached_ocr(self, label, y_min=0, y_max=99999, refresh=False):
+    def cached_ocr(self, label, y_min=0, y_max=99999, refresh=False, pkg=None):
         """取 OCR 结果，优先读缓存。返回 [(x, y, conf, text)]。"""
         import json
-        d = self._probe_dir(label)
+        d = self._probe_dir(label, pkg=pkg)
         fp = os.path.join(d, "ocr.json")
         if not refresh and os.path.isfile(fp):
             with open(fp, encoding="utf-8") as f:
@@ -1251,48 +1309,53 @@ class TestCase:
             json.dump(res, f, ensure_ascii=False, indent=1)
         return res
 
-    def probe_page(self, label, ocr=False, ttl=None, refresh=False):
+    def probe_page(self, label, ocr=False, ttl=None, refresh=False, pkg=None):
         """批量探查当前页：一次拿全 rid / text / bounds / 前台信息。
 
         返回结构化 dict，供生成用例的 agent 在内存里做匹配与规划，
         取代"点一步看一步"的单步试错。同时落盘供后续 grep 复用。
+        pkg: 缓存归属包名。探查系统页（PhotoPicker 等）时前台包是系统包，
+        必须显式传被测 App 包名（如 pkg="com.zui.calendar"），否则缓存
+        散到系统包名下，后续按被测包名检索不到、只能重探真机。
         """
-        xml = self.cached_dump(label, ttl=ttl, refresh=refresh)
+        xml = self.cached_dump(label, ttl=ttl, refresh=refresh, pkg=pkg)
         nodes = [{
             "rid": n["rid"], "text": n["text"], "desc": n["desc"],
             "cls": n["cls"], "bounds": n["bounds"], "bounds_xy": n["bounds_xy"],
             "clickable": n["clickable"] == "true",
         } for n in _parse_nodes(xml)]
+        # 前台包（记录用）与缓存归属包（参数 pkg）分离：探系统页时两者不同
         try:
-            pkg = self.d.app_current()["package"]
+            fg_pkg = self.d.app_current()["package"]
         except Exception:
-            pkg = None
+            fg_pkg = None
         info = {
             "label": label,
-            "package": pkg,
+            "package": fg_pkg,
             "texts": [n["text"] for n in nodes if n["text"]],
             "rids": sorted({n["rid"] for n in nodes if n["rid"]}),
             "nodes": nodes,
         }
         if ocr:
-            info["ocr"] = self.cached_ocr(label, refresh=refresh)
+            info["ocr"] = self.cached_ocr(label, refresh=refresh, pkg=pkg)
         # meta 落盘，便于检索
         import json
-        d = self._probe_dir(label)
+        d = self._probe_dir(label, pkg=pkg)
         os.makedirs(d, exist_ok=True)
         with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
-            json.dump({"label": label, "package": pkg,
+            json.dump({"label": label, "package": fg_pkg,
                        "ts": datetime.now().isoformat(timespec="seconds"),
                        "texts": info["texts"], "rids": info["rids"]},
                       f, ensure_ascii=False, indent=1)
         return info
 
     def find_nodes(self, label=None, rid_re=None, text_re=None,
-                   cls_re=None, clickable=None, ttl=None):
+                   cls_re=None, clickable=None, ttl=None, pkg=None):
         """在探查结果里按正则筛节点（不连设备时用缓存）。
         例: find_nodes("某页面", rid_re="switch_")
+        pkg: 归属包名，与 probe_page 的 pkg 参数对应（探系统页时传被测包）。
         """
-        xml = self.cached_dump(label, ttl=ttl) if label else self._dump()
+        xml = self.cached_dump(label, ttl=ttl, pkg=pkg) if label else self._dump()
         out = []
         for n in _parse_nodes(xml):
             d = {"rid": n["rid"], "text": n["text"],
@@ -1330,9 +1393,29 @@ class TestCase:
                 counts[r["result"]] = counts.get(r["result"], 0) + 1
         return counts
 
+    def _case_package_from_script(self):
+        """从用例脚本路径推断被测包名（cases/<包名>/<脚本>.py，目录名像包名才认）。
+
+        判据与 db.backfill_package 一致：纯 ASCII、含点、无空白。
+        推断不出（探查脚本无 script_path / 目录名不是包名）返回 None，
+        由调用方回退到收尾前台包。"""
+        sp = (getattr(self, "script_path", None) or "").replace("\\", "/")
+        m = re.search(r"/cases/([^/]+)/", sp)
+        if not m:
+            return None
+        cand = m.group(1)
+        if re.match(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$", cand):
+            return cand
+        return None
+
     # ── 报告 ────────────────────────────────────────────────────────
     def finish(self):
         global LAST_CASE
+        # 幂等守卫：已正常 finish 过的用例（收尾代码再抛异常时 run_case.py
+        # 的异常兜底会再调一次 finish），直接返回旧报告——重复执行会把刚
+        # 生成的报告再备份一遍并二次写库。用例已完整跑完出报告，无需重做。
+        if getattr(self, "_finished", False):
+            return self._report_path
         os.makedirs(REPORT_DIR, exist_ok=True)
         path = os.path.join(REPORT_DIR, f"{self.name}_报告.md")
         # 正式报告名始终反映最近一次运行（重跑覆盖是既定语义，DB 里另有全量历史）。
@@ -1351,19 +1434,31 @@ class TestCase:
         warn_n, blocked_n, info_n = counts["WARN"], counts["BLOCKED"], counts["INFO"]
         total = pass_n + fail_n          # 仅 PASS/FAIL 计入断言统计
         self.final_status = self._compute_final_status()
+        # 执行异常（run_case.py 捕获后设置 _fatal_error 再调 finish）：
+        # 用例没跑完，断言统计再好看也不可信 → 结论按 ERROR 压过一切。
+        if self._fatal_error is not None:
+            self.final_status = "ERROR"
         LAST_CASE = self                 # run_case.py 取最终结论定退出码
         # 包名同时入库：报告文件可能丢，库里的记录不会丢，
         # 重建报告时才能原样还原「被测 App」这一栏。
-        try:
-            package = self.d.app_current().get("package") or None
-        except Exception:
-            package = None                       # 断连等异常不该挡住报告生成
+        # 取值优先级：脚本路径目录名（cases/<包名>/xx.py，长得像包名才认）
+        # > 收尾前台包 —— 用例常停在 PhotoPicker 等系统页收尾，前台包可能
+        # 根本不是被测 App（168 实测报成 com.android.providers.media.module）。
+        package = self._case_package_from_script()
+        if package is None:
+            try:
+                package = self.d.app_current().get("package") or None
+            except Exception:
+                package = None                   # 断连等异常不该挡住报告生成
         lines = [f"# 测试报告：{self.name}",
                  f"\n**测试日期**：{datetime.now().strftime('%Y-%m-%d %H:%M')}",
                  f"**设备**：{self.device_info}",
                  f"**被测 App**：{package or 'unknown'}",
                  f"**最终结论**：{self.final_status}",
                  f"**证据目录**：{self.case_dir}\n"]
+        if self._fatal_error is not None:
+            lines.append(f"\n> ⚠️ **执行异常终止**（用例未跑完，结论不可信）："
+                         f"`{type(self._fatal_error).__name__}: {self._fatal_error}`\n")
         for s in self.steps:
             lines.append(f"\n## {s['name']}")
             for r in s["results"]:
@@ -1397,4 +1492,6 @@ class TestCase:
             except Exception as e:
                 # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
                 print(f"⚠️ [db] 用例完成状态入库失败: {e}")
+        self._finished = True
+        self._report_path = path
         return path

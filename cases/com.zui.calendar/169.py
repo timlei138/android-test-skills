@@ -17,7 +17,6 @@
 """
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -97,7 +96,7 @@ def import_and_handle(t, btn_text, allow, target_key, timeout=30):
 
     返回 (是否到达目标, 最终 Activity, 权限按钮实际文案)
     """
-    if not t.tap_text(btn_text, wait=5):
+    if not t.tap_text(btn_text, wait=5, silent=True):
         return False, f"未找到导入按钮 {btn_text!r}", ""
 
     # ① 关 App 内提示框（无条件弹，必须关）
@@ -135,20 +134,16 @@ def to_course_table(t, timeout=20):
         act = t.current_activity()
         # 在相机里 → 直接杀掉进程更快更稳（相机返回键可能被取景器吃掉）
         if "camera" in act.lower():
-            subprocess.run(["adb", "shell", "am", "force-stop", "com.zui.camera"],
-                           capture_output=True)
+            t.force_stop("com.zui.camera")
             time.sleep(1.2)
             continue
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_BACK"],
-                       capture_output=True)
+        t.adb_shell("input", "keyevent", "KEYCODE_BACK")
         time.sleep(1.2)
     if on_course_table(t):
         return True
 
     # 兜底：重新导航「更多 → 课程表」（此时日历应在主界面或课程表页）
-    subprocess.run(["adb", "shell", "monkey", "-p", PKG,
-                    "-c", "android.intent.category.LAUNCHER", "1"],
-                   capture_output=True)
+    t.launch_app(PKG)
     for _ in range(10):
         time.sleep(1)
         if on_course_table(t):
@@ -158,7 +153,7 @@ def to_course_table(t, timeout=20):
         if b:
             t.tap_xy((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
             time.sleep(1.2)
-            t.tap_text("课程表", wait=2)
+            t.tap_text("课程表", wait=2, silent=True)
             time.sleep(2)
     return on_course_table(t)
 
@@ -170,8 +165,7 @@ def run():
     t.step("前提-清理应用数据")
     t.pm_clear(PKG)
     time.sleep(1.5)
-    subprocess.run(["adb", "shell", "am", "force-stop", "com.zui.camera"],
-                   capture_output=True)
+    t.force_stop("com.zui.camera")
     t.record("INFO", "已 pm clear（重置权限与课程表），并停止相机进程")
 
     # ── 导航到课程表空状态页（过首启弹窗）──────────────────────────
@@ -201,7 +195,7 @@ def run():
     # 关掉 App 的「需要权限」提示框
     for w in ("取消", "知道了"):
         if any(w in x for x in t.screen_text() if x):
-            t.tap_text(w, wait=2)
+            t.tap_text(w, wait=2, silent=True)
             break
     time.sleep(1)
 
@@ -217,10 +211,8 @@ def run():
     t.screenshot("02_相机打开")
     if ok:
         # 退出相机，回到课程表页继续照片权限测试
-        subprocess.run(["adb", "shell", "am", "force-stop", "com.zui.camera"],
-                       capture_output=True)
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_BACK"],
-                       capture_output=True)
+        t.force_stop("com.zui.camera")
+        t.adb_shell("input", "keyevent", "KEYCODE_BACK")
         time.sleep(2)
 
     # ══ B 组：MEDIA ════════════════════════════════════════════════
@@ -240,7 +232,7 @@ def run():
     t.screenshot("03_图库拒绝提示")
     for w in ("取消", "知道了"):
         if any(w in x for x in t.screen_text() if x):
-            t.tap_text(w, wait=2)
+            t.tap_text(w, wait=2, silent=True)
             break
     time.sleep(1)
 

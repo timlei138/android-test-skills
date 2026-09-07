@@ -5,6 +5,9 @@
 每步重读验证，零惯性零过冲。
 目标: 第1节 = 08:30 - 09:15
 """
+import io
+import io
+import os
 import subprocess
 import time
 
@@ -13,6 +16,12 @@ from PIL import Image
 from rapidocr_onnxruntime import RapidOCR
 
 import sys as _sys
+
+# 多设备安全：adb 无 -s 时会打到默认选中的那台。本工具不持有 TestCase，
+# 依赖 ANDROID_SERIAL 环境变量（adb 原生支持）锁定设备；
+# 多台设备时未设置则拒绝运行，避免默默点错机器。
+_SERIAL = os.environ.get("ANDROID_SERIAL", "")
+_ADB = ["adb"] + (["-s", _SERIAL] if _SERIAL else [])
 
 _COL_X = {"开始时": 1178, "开始分": 1345, "结束时": 1694, "结束分": 1865}
 _COL_SPAN = {"开始时": 24, "开始分": 60, "结束时": 24, "结束分": 60}
@@ -34,10 +43,25 @@ ROW_GAP = 166      # 行间距
 _ocr = RapidOCR()
 
 
+def _check_serial():
+    """多台设备且未指定 ANDROID_SERIAL 时拒绝运行（防止点到错误的机器）。"""
+    if _SERIAL:
+        return
+    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    devs = [l.split()[0] for l in out.splitlines()[1:]
+            if len(l.split()) >= 2 and l.split()[1] == "device"]
+    if len(devs) > 1:
+        _sys.exit(f"检测到多台设备 {devs}，请设置 ANDROID_SERIAL=<serial> 后重跑")
+
+
 def screencap():
-    subprocess.run(["adb", "exec-out", "screencap", "-p"],
-                   stdout=open("/tmp/pk.png", "wb"))
-    return Image.open("/tmp/pk.png")
+    r"""截屏返回 PIL Image（内存中，不落盘）。
+    旧实现 stdout=open("/tmp/pk.png","wb")：fd 不关 + Unix 硬编码路径，
+    Windows 下解析成 C:\tmp\pk.png，目录不存在直接 FileNotFoundError。"""
+    _check_serial()
+    raw = subprocess.run(_ADB + ["exec-out", "screencap", "-p"],
+                         capture_output=True).stdout
+    return Image.open(io.BytesIO(raw))
 
 
 def read_col(cx):
@@ -56,7 +80,7 @@ def read_col(cx):
 
 
 def tap(cx, y):
-    subprocess.run(["adb", "shell", "input", "tap", str(cx), str(y)],
+    subprocess.run(_ADB + ["shell", "input", "tap", str(cx), str(y)],
                    capture_output=True)
 
 

@@ -208,6 +208,8 @@ class TestFrameworkDrift(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._mk(os.path.join(td, "ws"), base)
             self._mk(os.path.join(td, "skill"), base)
+            # 三方比对：把运行副本注入成工作区那份（真实 HERE 是开发仓，内容不同）
+            run_fw = os.path.join(td, "ws", "framework")
             old = {k: os.environ.get(k)
                    for k in ("DSH_ANDROID_TEST_DIR", "DSH_SKILL_DIR")}
             os.environ["DSH_ANDROID_TEST_DIR"] = os.path.join(td, "ws")
@@ -215,7 +217,7 @@ class TestFrameworkDrift(unittest.TestCase):
             try:
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    run_case.warn_if_framework_drift()
+                    run_case.warn_if_framework_drift(run_fw=run_fw)
                 self.assertNotIn("不一致", buf.getvalue())
                 # 制造漂移
                 with open(os.path.join(td, "ws", "framework",
@@ -223,9 +225,39 @@ class TestFrameworkDrift(unittest.TestCase):
                     f.write("changed")
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
-                    run_case.warn_if_framework_drift()
+                    run_case.warn_if_framework_drift(run_fw=run_fw)
                 self.assertIn("不一致", buf.getvalue())
                 self.assertIn("test_framework.py", buf.getvalue())
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+
+    def test_three_way_detects_stale_installed_copy(self):
+        """运行副本纳入比对：从开发仓直接跑时也能发现安装副本过期（168 实测场景）。"""
+        base = {f: "same" for f in run_case._DRIFT_KEY_FILES}
+        with tempfile.TemporaryDirectory() as td:
+            self._mk(os.path.join(td, "ws"), base)
+            self._mk(os.path.join(td, "skill"), base)
+            run = self._mk(os.path.join(td, "run"), base)
+            for f in run_case._DRIFT_KEY_FILES:
+                with open(os.path.join(run, f), "w", encoding="utf-8") as fh:
+                    fh.write("newer")          # 运行副本比另外两份新
+            old = {k: os.environ.get(k)
+                   for k in ("DSH_ANDROID_TEST_DIR", "DSH_SKILL_DIR")}
+            os.environ["DSH_ANDROID_TEST_DIR"] = os.path.join(td, "ws")
+            os.environ["DSH_SKILL_DIR"] = os.path.join(td, "skill")
+            try:
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    run_case.warn_if_framework_drift(run_fw=run)
+                out = buf.getvalue()
+                self.assertIn("正在运行", out)
+                self.assertIn("工作区备份", out)
+                self.assertIn("skill包", out)
+                self.assertIn("test_framework.py", out)
             finally:
                 for k, v in old.items():
                     if v is None:
@@ -352,6 +384,124 @@ class TestFinalStatus(unittest.TestCase):
         self.assertEqual(self._mk(["WARN", "FAIL"])._compute_final_status(), "FAIL")
         self.assertEqual(self._mk(["INFO"])._compute_final_status(), "PASS")
 
+    def test_fatal_error_forces_error(self):
+        """异常路径（N4）：run_case 捕获异常设 _fatal_error 后补调 finish()，
+        结论必须压成 ERROR —— 用例没跑完，断言统计再好看也不可信。"""
+        t = self._mk(["PASS", "PASS"])
+        t.name = "单测_fatal_error"
+        t.device_info = "fake-device"
+        t.case_dir = tempfile.mkdtemp()      # finish() 报告头引用证据目录
+        t._case_start_time = time.time()
+        t._dump_count = 0
+        t._db = None
+        t._db_case_id = None
+        t._fatal_error = RuntimeError("模拟执行中途异常")
+        old_last = tf.LAST_CASE
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "ERROR")
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_finish_idempotent(self):
+        """finish() 幂等守卫（P3-1）：用例正常 finish 后收尾代码再抛异常时，
+        run_case 的异常兜底会再调一次 finish —— 必须直接返回旧报告，
+        不重复备份/写库/重算结论。"""
+        t = self._mk(["PASS"])
+        t.name = "单测_finish_幂等"
+        t.device_info = "fake-device"
+        t.case_dir = tempfile.mkdtemp()
+        t._case_start_time = time.time()
+        t._dump_count = 0
+        t._db = None
+        t._db_case_id = None
+        t._fatal_error = None
+        old_last = tf.LAST_CASE
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                p1 = t.finish()
+                self.assertTrue(t._finished)
+                self.assertEqual(t.final_status, "PASS")
+                # 模拟"finish 后收尾代码又出事"：改变状态再调 finish，
+                # 守卫应直接返回旧路径，final_status 不被重算覆盖
+                t._fatal_error = RuntimeError("finish 之后的收尾异常")
+                p2 = t.finish()
+            self.assertEqual(p1, p2)
+            self.assertEqual(t.final_status, "PASS")   # 不变 ERROR
+            self.assertEqual(buf.getvalue().count("报告已生成"), 1)
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_finish_idempotent(self):
+        """finish() 幂等守卫（P3-1）：用例正常 finish 后收尾代码再抛异常时，
+        run_case 的异常兜底会再调一次 finish —— 必须直接返回旧报告，
+        不重复备份/写库/重算结论。"""
+        t = self._mk(["PASS"])
+        t.name = "单测_finish_幂等"
+        t.device_info = "fake-device"
+        t.case_dir = tempfile.mkdtemp()
+        t._case_start_time = time.time()
+        t._dump_count = 0
+        t._db = None
+        t._db_case_id = None
+        t._fatal_error = None
+        old_last = tf.LAST_CASE
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()) as rd:
+                p1 = t.finish()
+                self.assertTrue(t._finished)
+                self.assertEqual(t.final_status, "PASS")
+                # 模拟"finish 后收尾代码又出事"：改变状态再调 finish，
+                # 守卫应直接返回旧路径，final_status 不被重算覆盖
+                t._fatal_error = RuntimeError("finish 之后的收尾异常")
+                p2 = t.finish()
+            self.assertEqual(p1, p2)
+            self.assertEqual(t.final_status, "PASS")   # 不变 ERROR
+            self.assertEqual(buf.getvalue().count("报告已生成"), 1)
+        finally:
+            tf.LAST_CASE = old_last
+
+
+# ── 被测 App 包名推断（finish() 报告头 / DB package 列的数据源）──────
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestCasePackageInference(unittest.TestCase):
+    """package 取值优先级：脚本目录名（像包名）> 收尾前台包。
+
+    背景：用例常停在 PhotoPicker 等系统页收尾，前台包可能根本不是被测 App
+    （168 实测报成 com.android.providers.media.module）。"""
+
+    def _mk(self, script_path):
+        t = object.__new__(tf.TestCase)
+        t.script_path = script_path
+        return t
+
+    def test_infers_from_windows_script_path(self):
+        t = self._mk("C:\\Users\\u\\.agents\\skills\\android-gui-testing"
+                     "\\cases\\com.zui.calendar\\168.py")
+        self.assertEqual(t._case_package_from_script(), "com.zui.calendar")
+
+    def test_infers_from_posix_script_path(self):
+        t = self._mk("/home/u/skills/android-gui-testing/cases/com.a.b/172.py")
+        self.assertEqual(t._case_package_from_script(), "com.a.b")
+
+    def test_non_package_dir_returns_none(self):
+        t = self._mk("D:\\x\\cases\\联想日历\\168.py")
+        self.assertIsNone(t._case_package_from_script())
+
+    def test_no_cases_segment_returns_none(self):
+        t = self._mk("D:\\somewhere\\168.py")
+        self.assertIsNone(t._case_package_from_script())
+
+    def test_no_script_path_returns_none(self):
+        self.assertIsNone(self._mk(None)._case_package_from_script())
+
 
 # ── vision.py：鉴权头使用真实 Key（mock HTTP，不触网、不泄露）──────
 class TestVisionAuth(unittest.TestCase):
@@ -468,8 +618,10 @@ class TestRequireTap(unittest.TestCase):
 
     def test_missing_element_aborts(self):
         t = self._mk('<hierarchy><node text="别的" bounds="[0,0][1,1]"/></hierarchy>')
+        buf = io.StringIO()
         with self.assertRaises(tf.CaseAbort):
-            t.require_tap_text("不存在", wait=0.4)
+            with contextlib.redirect_stdout(buf):   # record 会打 ❌ emoji，GBK 控制台会崩
+                t.require_tap_text("不存在", wait=0.4)
         results = t._cur_step["results"]
         self.assertTrue(any(r["result"] == "FAIL" for r in results))
 
@@ -518,6 +670,119 @@ class TestRecordAutoStep(unittest.TestCase):
         # 已开过 step 时不能另起一个，结果必须落在原步骤里
         self.assertEqual(len(t.steps), 1)
         self.assertEqual(t.steps[0]["name"], "我的步骤")
+
+
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestTapUnifiedContract(unittest.TestCase):
+    """统一动作基元契约（N1/N2 修复的回归保护）：
+    tap_* 轮询定位返回 bool；找不到默认记 WARN；silent=True 时交由调用方
+    守卫分支记录（防双重记录）；observe=False 立即返回不延迟。"""
+
+    _XML = ('<hierarchy><node text="确定" resource-id="com.x:id/btn" '
+            'bounds="[10,20][110,60]" clickable="true"/></hierarchy>')
+
+    def _mk(self, xml=None):
+        t = object.__new__(tf.TestCase)
+        t._wd_enabled = False
+        t._db = None
+        t._db_step_id = None
+        t._cur_step = {"name": "s", "results": [], "evidences": []}
+        t._shot_idx = 0
+        t.case_dir = tempfile.mkdtemp()
+        t._auto_screenshot = lambda *a, **k: None     # 单测不真截屏
+        clicks = []
+
+        class FakeD:
+            def dump_hierarchy(self_):
+                return xml if xml is not None else TestTapUnifiedContract._XML
+
+            def click(self_, x, y):
+                clicks.append((x, y))
+
+            def send_keys(self_, s):
+                pass
+
+            def clear_text(self_):
+                pass
+        t.d = FakeD()
+        t._clicks = clicks
+        return t
+
+    def test_hit_returns_true_and_clicks_center(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(tf, "ACTION_DELAY", 0):
+            self.assertTrue(t.tap_text("确定", wait=1))
+        self.assertEqual(t._clicks, [(60, 40)])   # bounds [10,20][110,60] 中心
+
+    def test_miss_returns_false_and_records_warn(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(tf, "ACTION_DELAY", 0):
+            self.assertFalse(t.tap_text("不存在", wait=0.3))
+        self.assertEqual([r["result"] for r in t._cur_step["results"]], ["WARN"])
+
+    def test_miss_silent_records_nothing(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(tf, "ACTION_DELAY", 0):
+            self.assertFalse(t.tap_text("不存在", wait=0.3, silent=True))
+        self.assertEqual(t._cur_step["results"], [])   # 守卫语义交还调用方
+
+    def test_observe_false_returns_immediately(self):
+        t = self._mk()
+        t0 = time.time()
+        self.assertTrue(t.tap_rid("com.x:id/btn", observe=False))
+        self.assertLess(time.time() - t0, 0.5)          # 不 sleep(ACTION_DELAY)
+        self.assertEqual(t._clicks, [(60, 40)])
+
+    def test_tap_xy_returns_true(self):
+        t = self._mk()
+        self.assertIs(t.tap_xy(5, 5, observe=False), True)  # 不再返回 self 链式
+
+    def test_input_text_hit_and_miss_silent(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(tf, "ACTION_DELAY", 0):
+            self.assertTrue(t.input_text("com.x:id/btn", "你好", wait=1))
+            self.assertFalse(t.input_text("com.x:id/none", "x", wait=0.3,
+                                          silent=True))
+        self.assertEqual(t._clicks, [(60, 40)])
+        self.assertEqual(t._cur_step["results"], [])   # silent：无 WARN 兜底
+
+
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestRequireTapSingleImpl(unittest.TestCase):
+    """require_* 收敛为 tap_* 的 silent 模式（N2 竞态消除）：
+    命中时不产生任何 WARN/FAIL 记录 —— 旧实现"先 wait 后 tap"两步之间的
+    竞态窗口已消除，且不会双重记录。"""
+
+    def _mk(self):
+        t = object.__new__(tf.TestCase)
+        t._wd_enabled = False
+        t._db = None
+        t._db_step_id = None
+        t._cur_step = {"name": "s", "results": [], "evidences": []}
+        t._shot_idx = 0
+        t.case_dir = tempfile.mkdtemp()
+        t._auto_screenshot = lambda *a, **k: None
+
+        class FakeD:
+            def dump_hierarchy(self_):
+                return ('<hierarchy><node text="确定" resource-id="com.x:id/btn" '
+                        'bounds="[0,0][100,50]" clickable="true"/></hierarchy>')
+
+            def click(self_, x, y):
+                pass
+        t.d = FakeD()
+        return t
+
+    def test_hit_records_nothing(self):
+        t = self._mk()
+        with contextlib.redirect_stdout(io.StringIO()), \
+                mock.patch.object(tf, "ACTION_DELAY", 0):
+            self.assertIs(t.require_tap_text("确定", wait=1), True)
+        self.assertEqual(t._cur_step["results"], [])   # 命中：零记录零噪声
 
 
 if __name__ == "__main__":

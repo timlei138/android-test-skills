@@ -12,7 +12,6 @@
 """
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -66,9 +65,8 @@ DLG_TOP, DLG_BOTTOM = 1350, 1870
 
 
 def _back(t):
-    """返回上一页（BACK 键）。"""
-    subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_BACK"],
-                   capture_output=True)
+    """返回上一页（BACK 键，绑定用例 serial）。"""
+    t.adb_shell("input", "keyevent", "KEYCODE_BACK")
     time.sleep(1.3)
 
 
@@ -85,7 +83,7 @@ def _ocr_numbers(t, tag):
 
 def _open_dialog(t, label, entry_text):
     """打开一个时长弹框并验证其正常打开，返回是否成功。"""
-    if not t.tap_text(entry_text, wait=4):
+    if not t.tap_text(entry_text, wait=4, silent=True):
         t.record("FAIL", f"未找到'{entry_text}'入口")
         return False
     time.sleep(1.8)
@@ -99,7 +97,7 @@ def _open_dialog(t, label, entry_text):
     t.screenshot(f"{label}弹框")
     _ocr_numbers(t, label)
     # 用「取消」关闭，顺带验证按钮可用
-    if not t.tap_text("取消", wait=3):
+    if not t.tap_text("取消", wait=3, silent=True):
         _back(t)
     time.sleep(1.2)
     return ok
@@ -123,7 +121,7 @@ def run():
 
     # ── Step1: 点击「课程时间设置」─────────────────────────────────────
     t.step("Step1 点击课程时间设置")
-    if not t.tap_text("课程时间设置", wait=4):
+    if not t.tap_text("课程时间设置", wait=4, silent=True):
         t.record("FAIL", f"未找到'课程时间设置'入口，屏幕={t.screen_text()[:8]}")
         return t.finish()
     time.sleep(2)
@@ -180,7 +178,7 @@ def run():
         return t.finish()
     t.record("INFO", "已从课程时间设置页返回确认页")
 
-    if not t.tap_text("课程提醒时间", wait=4):
+    if not t.tap_text("课程提醒时间", wait=4, silent=True):
         t.record("FAIL", f"未找到'课程提醒时间'入口，屏幕={t.screen_text()[:8]}")
         return t.finish()
     time.sleep(1.6)
@@ -191,7 +189,7 @@ def run():
     t.record("PASS" if not miss else "FAIL",
              f"课程提醒时间入口打开，选项={shown}，缺失={miss}")
     t.screenshot("04_课程提醒时间选项")
-    if not t.tap_text("取消", wait=3):
+    if not t.tap_text("取消", wait=3, silent=True):
         _back(t)
 
     t.stop_watchdog()

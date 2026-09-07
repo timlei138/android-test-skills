@@ -125,34 +125,61 @@ def _file_digest(path):
     return h.hexdigest()
 
 
-def warn_if_framework_drift():
-    """工作区 framework 副本与 skill 包不一致时醒目告警；任一侧缺失则跳过。"""
+def warn_if_framework_drift(run_fw=None):
+    """framework 多副本哈希比对：运行副本 / 工作区备份 / skill 包安装副本。
+
+    本机可能同时存在三份以上 framework（开发仓、工作区备份、Agent 安装的
+    skill 副本）。旧实现只比对后两份：从开发仓直接运行时，"安装副本过期"
+    检测不到，且告警文案指向的 sync 脚本修不到真正在跑的代码。
+    现在把运行副本纳入比对，告警标出每份路径与"正在运行的是哪份"。
+    run_fw 供单测注入；默认 = 本文件所在 framework 目录。
+    """
+    run_fw = run_fw or HERE
     try:
         from db import default_test_dir
         ws_fw = os.path.join(default_test_dir(), "framework")
     except Exception:
-        return
+        ws_fw = None
     skill_root = os.environ.get("DSH_SKILL_DIR") or os.path.join(
         os.path.expanduser("~"), ".agents", "skills", "android-gui-testing")
     skill_fw = os.path.join(skill_root, "framework")
-    if not (os.path.isdir(ws_fw) and os.path.isdir(skill_fw)):
+
+    dirs = [("运行副本", run_fw), ("工作区备份", ws_fw), ("skill包", skill_fw)]
+    seen, uniq = set(), []
+    for label, d in dirs:
+        if not d or not os.path.isdir(d):
+            continue
+        k = os.path.normcase(os.path.abspath(d))
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append((label, d))
+    if len(uniq) < 2:
         return
-    if os.path.normcase(os.path.abspath(ws_fw)) == os.path.normcase(os.path.abspath(skill_fw)):
-        return
+
     diffs = []
     for f in _DRIFT_KEY_FILES:
-        a, b = os.path.join(skill_fw, f), os.path.join(ws_fw, f)
-        if not (os.path.isfile(a) and os.path.isfile(b)):
-            diffs.append(f + "（单侧缺失）")
-        elif _file_digest(a) != _file_digest(b):
-            diffs.append(f)
+        by_hash = {}                       # hash/缺失 -> [标签]
+        for label, d in uniq:
+            fp = os.path.join(d, f)
+            if not os.path.isfile(fp):
+                by_hash.setdefault("缺失", []).append(label)
+                continue
+            by_hash.setdefault(_file_digest(fp), []).append(label)
+        if len(by_hash) > 1:
+            detail = "；".join(
+                f"{','.join(labels)}={state if state == '缺失' else state[:8]}"
+                for state, labels in by_hash.items())
+            diffs.append(f"{f}（{detail}）")
     if diffs:
         print("⚠️ " * 8)
-        print(f"⚠️  工作区 framework 与 skill 包不一致: {', '.join(diffs)}")
-        print(f"⚠️  skill包: {skill_fw}")
-        print(f"⚠️  工作区:  {ws_fw}")
-        print("⚠️  请运行 scripts/sync_skill.ps1 同步（-ToSkill 为工作区→skill包），")
-        print("⚠️  否则你改的代码可能不是正在跑的代码。")
+        print(f"⚠️  framework 多副本不一致，正在运行: [{uniq[0][0]}] {uniq[0][1]}")
+        for label, d in uniq:
+            print(f"⚠️    [{label}] {d}")
+        for d in diffs:
+            print(f"⚠️    {d}")
+        print("⚠️  本次执行的代码就是「运行副本」这份；其余副本过期只会误导其它入口，")
+        print("⚠️  请把要生效的那份同步到其它副本（如 Agent 安装的 skill 目录）。")
         print("⚠️ " * 8)
 
 
@@ -215,16 +242,23 @@ def main():
     except KeyboardInterrupt:
         raise
     except Exception as e:
-        # 脚本/框架/设备异常：留完整堆栈，尽量生成已有证据的报告
+        # 脚本/框架/设备异常：留完整堆栈，尽量生成已有证据的报告。
+        # ⚠️ 必须先标记 _fatal_error 再 finish：用例没跑完，断言统计不可信，
+        # 不标记的话报告结论会按已跑部分算（可能 PASS）与退出码 3 ERROR 矛盾。
+        # CaseAbort 例外：require_* 已记 FAIL，结论就是 FAIL（退出码 1），
+        # 标 ERROR 反而与退出码矛盾。
         traceback.print_exc()
+        from test_framework import CaseAbort
+        is_abort = isinstance(e, CaseAbort)
         tc = _last_case()
         if tc is not None:
             try:
+                if not is_abort:
+                    tc._fatal_error = e
                 tc.finish()
             except Exception:
                 pass
-        from test_framework import CaseAbort
-        code = 1 if isinstance(e, CaseAbort) else 3
+        code = 1 if is_abort else 3
         print(f"\n💥 用例异常终止（{'必需操作失败' if code == 1 else '执行异常'}），"
               f"退出码 {code}")
         sys.exit(code)

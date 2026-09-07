@@ -4,7 +4,6 @@
 步骤: 更多→课程表 → 图库导入课程表 → 验证进入图片选择
 """
 import os
-import subprocess
 import sys
 import time
 
@@ -43,10 +42,8 @@ def run():
 
     # ── Step 1: 更多→课程表 ────────────────────────────────────────
     t.step("Step1 主页→更多→课程表")
-    # 启动 App
-    subprocess.run(["adb", "shell", "monkey", "-p", PKG,
-                    "-c", "android.intent.category.LAUNCHER", "1"],
-                   capture_output=True)
+    # 启动 App（t.launch_app 绑定本用例 serial，多设备不串台）
+    t.launch_app(PKG)
     # 等主界面就绪：「更多」按钮出现 = 首页渲染完成。
     # 轮询期间每次 dump 都顺带驱动看门狗，首启弹窗被自动处理。
     t.wait_rid("com.zui.calendar:id/iv_more", timeout=15)
@@ -56,7 +53,7 @@ def run():
         t.blocked("无法进入课程表")
         return t.finish()
     t.record("PASS", "更多菜单弹出，包含'课程表'入口")
-    t.tap_text("课程表")
+    t.tap_text("课程表", silent=True)   # 后续 wait_text 验证，避免双重 WARN
     # pm_clear 后必为空状态页；等到空态文案再截图，而非固定 sleep
     if not t.wait_text("还未添加课程表", timeout=8):
         t.record("WARN", "课程表空状态文案未在 8s 内出现，按当前屏幕继续")
@@ -68,7 +65,7 @@ def run():
     if any("图库导入课程表" in x for x in texts):
         # 空状态：页面直接有大按钮
         t.record("PASS", "空状态页显示'从图库导入课程表'按钮（可点击）")
-        t.tap_text("从图库导入课程表")
+        t.tap_text("从图库导入课程表", silent=True)   # Step3 用 Activity 验证
     else:
         # 非空状态：顶栏图标（最左 = 导入菜单）
         for attempt in range(3):
@@ -78,7 +75,7 @@ def run():
                 # 等菜单项出现（条件等待，替代固定 sleep）
                 if t.wait_text("图库导入", timeout=3):
                     t.record("PASS", "工具栏导入菜单出现，'图库导入课程表'可点击")
-                    t.tap_text("图库导入课程表")
+                    t.tap_text("图库导入课程表", silent=True)
                 break
             time.sleep(1)
         else:

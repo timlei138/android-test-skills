@@ -4,7 +4,6 @@
 """
 import os
 import re
-import subprocess
 import sys
 import time
 
@@ -35,18 +34,15 @@ def run():
     t.step("前提-创建课程表")
     t.pm_clear(PKG)
     time.sleep(1)
-    subprocess.run(["adb", "shell", "am", "force-stop", "com.zui.camera"],
-                   capture_output=True)
-    subprocess.run(["adb", "shell", "monkey", "-p", PKG,
-                    "-c", "android.intent.category.LAUNCHER", "1"],
-                   capture_output=True)
+    t.force_stop("com.zui.camera")
+    t.launch_app(PKG)
     t.dismiss_first_use_dialogs(policy="allow", max_rounds=12, verbose=False)
     if not tap_more_menu(t):
         t.record("FAIL", "无法打开'更多'菜单")
         return t.finish()
-    t.tap_text("课程表")
+    t.tap_text("课程表", silent=True)      # 后续验证在下方
     time.sleep(2)
-    if not t.tap_text("手动创建课程表", wait=4):
+    if not t.tap_text("手动创建课程表", wait=4, silent=True):
         t.record("FAIL", "未找到'手动创建课程表'")
         return t.finish()
     t.input_text("com.zui.calendar:id/et_schedule_name", "原课表")
@@ -65,8 +61,7 @@ def run():
         texts = t.screen_text()
         if any("第1周" in x for x in texts) and any("周一" in x for x in texts):
             break
-        subprocess.run(["adb", "shell", "input", "keyevent", "KEYCODE_BACK"],
-                       capture_output=True)
+        t.adb_shell("input", "keyevent", "KEYCODE_BACK")
         time.sleep(1.2)
     texts = t.screen_text()
     if not (any("原课表" in x for x in texts) and any("周一" in x for x in texts)):
@@ -94,7 +89,7 @@ def run():
     # 展示页弹窗文字是"图库导入课程表"（无"从"字，与空状态页不同）
     # 先启动看门狗：提示弹窗 + 照片权限弹窗需立即点击（8秒自动消失）
     t.start_watchdog(policy="allow", verbose=False)
-    if not t.tap_text("图库导入课程表", wait=4):
+    if not t.tap_text("图库导入课程表", wait=4, silent=True):
         t.record("FAIL", "未找到'图库导入课程表'菜单项")
         t.stop_watchdog()
         return t.finish()
@@ -128,7 +123,7 @@ def run():
         # 点"完成"确认裁剪（裁剪页右上角；点击后进入解析）
         confirmed = False
         for attempt in range(10):
-            if t.tap_text("完成", wait=2):
+            if t.tap_text("完成", wait=2, silent=True):
                 time.sleep(2.5)
                 texts = t.screen_text()
                 if any("正在解析" in x for x in texts) or not any("左转" in x for x in texts):
@@ -170,11 +165,11 @@ def run():
     # ── Step3: 确认流程 → 验证新课表创建 + 原有课表保留 ─────────────
     t.step("Step3 确认导入并验证新课表创建且原课表未覆盖")
     # 确认流程：预览页"下一步" → 确认页"完成" → 回到课程表列表
-    if not t.tap_text("下一步", wait=4):
+    if not t.tap_text("下一步", wait=4, silent=True):
         t.record("FAIL", "未找到预览页'下一步'按钮")
         return t.finish()
     time.sleep(2)
-    if not t.tap_text("完成", wait=4):
+    if not t.tap_text("完成", wait=4, silent=True):
         t.record("FAIL", "未找到确认页'完成'按钮")
         return t.finish()
     time.sleep(2)

@@ -1,11 +1,20 @@
 # ZUI 日历（联想平板）
 
 - **app**: `com.zui.calendar`
-- 验证版本: 9.0.0.83（TB323FU）
-- 最近验证: 2026-09-03（168/169/170/172/175/176 六用例全通过，50 条断言；179 节行编辑/冲突 toast 探明）
+- **验证版本**: 9.0.0.83（TB323FU，Android 17）
+- **最近验证**: 2026-09-03（168/169/170/172/175/176 六用例全通过；179 链路已探明待真机回归。
+
+  下次大版本真机回归通过后整卡重写：删过时条目、合并按会话堆出来的段落、刷新本行）
 
 > 本卡是给 AI 看的操作地图：先查「标准链路」命中就照走，不要从零探路。
-> 原则：写正确的路径优先；坑只写在离对应路径最近的位置，避免堆成负面清单。
+> 原则：写正确的路径优先；坑写在离对应路径最近的位置，避免堆成负面清单。
+> 坐标/热区偏移/行距等机型实测值行尾打 [TB323FU/9.0.0.83] —— 换机型即失效，先小探针校准。
+
+## 检索索引
+
+滚轮、时间选择器、TimePicker、节次、节数、课程时间、冲突、自动调整、权限、相机、
+图库导入、拍照导入、PhotoPicker、裁剪、解析、导入弹窗、知道了、手动创建、新建课程表、
+空课表、周视图、添加课程、背景色、色块、当前课表、学期、周数、拒绝并不再询问
 
 ## 前置条件
 
@@ -40,64 +49,59 @@
 2. **系统权限弹窗**（相机 / 照片）→ **仅当对应权限未授予时才弹**
    - 已授予 → 跳过本步，直接进相机 / PhotoPicker
    - 未授予 → 按 policy 点「允许/拒绝」
-   - 权限弹窗约 8s 自动消失，出现必须立即点
    - ⚠️ 按钮文案随"是否拒绝过"变化、必须用正则匹配，见下方「权限弹窗」小节
 
 因此测权限行为前，若上一轮已允许过，需 `pm revoke` 重置前提，否则第 2 段根本不出现。
 （revoke 后弹窗仍会出现，但「拒绝」已变为「拒绝并不再询问」。）
 
-### 图库导入创建课程表
+### 图库导入（到「确认课程表基本信息」页）
 
-适用: 前置为「已通过图库导入图片并完成解析」的用例。可复用函数: `cases/com.zui.calendar/_flow.py → goto_图库导入_基本信息确认页()`。
+可复用: `cases/com.zui.calendar/_flow.py → goto_图库导入_基本信息确认页()`。
+完整链路（入口 → 提示弹窗 → 照片权限 → PhotoPicker 选图 → 裁剪完成 → 等解析 → 下一步）
+实现在函数里，卡不重复抄写。用例侧只需知道三个函数外差异：
 
-1. 点导入入口（空状态 `btnImportFromGallery`；展示页菜单「图库导入课程表」——无「从」字）
-2. App 内提示弹窗「请确保图片清晰、完整」→ 点「知道了」（见上方「导入弹窗顺序」）
-3. 系统照片权限弹窗（未授予时才有）→ 点「全部允许」（Android14+ 是"选择照片/全部允许"，不是普通"允许"）
-4. PhotoPicker → 切「照片」tab → 点缩略图 `com.android.providers.media.module:id/icon_thumbnail`
-5. 裁剪页 → 点完成 `com.zui.calendar:id/btnDone`
-6. 等待解析：轮询直到出现「确认识别结果」（约 20s，需联网；**轮询窗口给到 60s**——
-   `_flow.goto_图库导入_基本信息确认页(timeout=60)`；窗口低于 ~20s 会在解析中途误判为超时）
-7. 确认识别结果页 → 点「下一步」`com.zui.calendar:id/btn_next`
-8. 到达目标页「确认课程表基本信息」
+- 解析需联网（约 20s），**轮询窗口必须 ≥60s**（`goto_图库导入_基本信息确认页(timeout=60)`；
+  窗口低于 ~20s 会在解析中途误判为超时）
+- 素材: `/sdcard/Pictures/日历/课程表.png`，导入前先 `MEDIA_SCANNER_SCAN_FILE` 广播，
+  否则 PhotoPicker 显示「无相册」
+- 目标页「确认课程表基本信息」控件（断言用）:
+  名称 `et_schedule_name`（图库导入预填「学生课程表」，断言前 `clear_text`）、
+  完成 `btn_finish`、学期开始 `layout_semester_start_date` / `tv_semester_start_date`、
+  当前周数 `layout_current_week` / `tv_current_week`、总周数 `layout_total_weeks` / `tv_total_weeks`、
+  周末有课 `switch_weekend_classes`、显示非本周 `switch_show_non_current_week`
 
-素材: `/sdcard/Pictures/日历/课程表.png`（导入前先 `MEDIA_SCANNER_SCAN_FILE` 广播，否则 PhotoPicker 显示「无相册」）
+### 拍照导入（到相机拉起）
 
-目标页「确认课程表基本信息」控件:
+可复用: `cases/com.zui.calendar/_flow.py → test_camera()`。
+链路: 空状态页「拍照导入」→ 提示弹窗「知道了」→ 相机权限弹窗（未授予时）→
+`com.zui.camera/.CaptureActivity`。坑:
 
-- 名称输入: `et_schedule_name`（图库导入预填「学生课程表」，断言前必须 `clear_text`）
-- 完成按钮: `btn_finish`
-- 学期开始时间: `layout_semester_start_date` / `tv_semester_start_date`
-- 当前周数: `layout_current_week` / `tv_current_week`
-- 学期总周数: `layout_total_weeks` / `tv_total_weeks`
-- 周末有课: `switch_weekend_classes`
-- 显示非本周课程: `switch_show_non_current_week`
+- **提示弹窗不关，相机 25s 都不会拉起**——必须显式关（时序竞争见「导入弹窗顺序」）
+- 从相机返回: 返回键可能被取景器吃掉，`am force-stop com.zui.camera` 更快更稳；
+  且退回的是日历主界面（不是课程表页），需重新走「更多 → 课程表」
 
-### 拍照导入（到相机打开）
+### 手动创建（到新建课程表页）
 
-适用: 权限用例（169 系列）等需要拉起相机的场景。可复用函数: `cases/com.zui.calendar/_flow.py → test_camera()`。
+可复用: `cases/com.zui.calendar/_flow.py → goto_手动创建课程表()`。
+链路只有一步（空状态页「手动创建」`btnCreateManually` → EditTimetableActivity），
+坑全在目标页:
 
-1. 课程表空状态页 → 点「拍照导入课程表」
-2. App 内提示弹窗「请确保图片清晰、完整」→ 点「知道了」（见上方「导入弹窗顺序」；
-   **不关这个框相机 25s 都不会拉起，看门狗兜底存在时序竞争，必须显式关**）
-3. 系统相机权限弹窗（未授予时才有）→ 按 policy 点「允许/拒绝」（仅在使用中允许/始终允许/全部允许是变体）
-4. 相机打开: `com.zui.camera/.CaptureActivity`
-
-### 手动创建课程表
-
-适用: 前置为「新建课程表页」且不需要图片解析的用例。可复用函数: `cases/com.zui.calendar/_flow.py → goto_手动创建课程表()`。
-
-1. 课程表空状态页 → 点「手动创建课程表」
-2. 到达新建课程表页（名称为空，无预填；完成按钮 rid 是 `save_view` 而不是 `btn_finish`）
+- 名称默认空且**必填**：不填点「完成」会被校验拦住（页面不动）；图库导入确认页才有预填名
+- 保存 = toolbar 右侧 `action_save`（文本「完成」），**不是** `btn_finish`
+- **不要按 back 收键盘**——back 会直接退出 EditTimetableActivity 丢编辑（实测踩到）
 
 ### 确认页导航关系（页面拓扑）
 
-- 「确认课程表基本信息」页点左上角返回 `(123, 203)` → 回到「确认识别结果」页（`TempTimetableActivity`），**不是**课程表页也不是主页；要重进确认流程就再点「下一步」
-- 识别结果页顶栏右侧没有图标，`_flow.tap_rightmost_icon()` 会退化匹配到左侧返回键 `(135, 203)`，在该页不要用它找「更多」
+- 「确认课程表基本信息」页点左上角返回 `(123, 203)` [TB323FU/9.0.0.83] → 回到「确认识别结果」页
+  （`TempTimetableActivity`），**不是**课程表页也不是主页；要重进确认流程就再点「下一步」
+- 识别结果页顶栏右侧没有图标，`_flow.tap_rightmost_icon()` 会退化匹配到左侧返回键
+  `(135, 203)` [TB323FU/9.0.0.83]，在该页不要用它找「更多」
 - 确认页点「完成」→ 创建课程表 → 课程表列表（列表含「全部课程表 / <课表名> / 当前 / 设置」）
 - 多课表时**每个课表名下各带一个「设置」**（170 实测：原课表 / 当前 / 设置 / 学生课程表 / 设置）
-- 「当前」标签跟在**原有**课表后面 —— 新导入/新建的课表**不会自动抢占当前**，验证"未覆盖"就以「当前」仍属原表为准
+- 「当前」标签跟在**原有**课表后面 —— 新导入/新建的课表**不会自动抢占当前**，
+  验证"未覆盖"就以「当前」仍属原表为准
 
-### 课程时间设置页（175 探明）
+## 课程时间设置页
 
 入口: 确认页「课程时间设置」（副标题「设置课程节数，调整每节课时间」）
 Activity: `com.zui.calendar/.timetable.management.TimeSlotSettingsActivity`
@@ -115,46 +119,43 @@ Activity: `com.zui.calendar/.timetable.management.TimeSlotSettingsActivity`
 - 节次明细「第1节」与「08:00-08:30」是**两个独立文本节点** —— 断言要分别匹配，
   别要求同一节点同时含「第」和「-」，那样永远匹配不到、会把正常产品误报成 FAIL（175 首跑踩过）
 - 两个时长弹框的内容区是 **Canvas 自绘**（`customPanel` 下无任何 dump 子节点），当前值读不到：
-  只断言弹框打开（标题 + 取消/确定），数值用 `t.ocr(1350, 1870)` 补读并记 INFO
+  只断言弹框打开（标题 + 取消/确定），数值用 `t.ocr(1350, 1870)` [TB323FU/9.0.0.83] 补读并记 INFO
   —— 弹框半透明，OCR 会混入背景文字（「第4节」「下午课程」等），**不可作断言**
 - 「上午课程 / 下午课程 / 晚上课程」是**分组标题**（`clickable=false`），点了页面不动是正常设计，
   不是 Bug；用例只要求"查看入口"时，断言其存在 + 节数显示即可
 - 返回确认页用 BACK 键；**别点本页「完成」**（会直接创建课程表）
 
-### 节行编辑 TimePickerDialog（179 探明）
+## 节行编辑 TimePickerDialog
 
 - 设置页 desc=编辑 的 arrow 共 13 个，**按 y 排序后前 2 个是「每节课上课时长/课间休息时长」行，
   第 3 个起才是节行**（第1节 = 排序后 idx 2，0-based）；按序号定位前先排序
 - 节行弹窗 = 同款 Canvas 双滚轮（左=开始 时+分，右=结束 时+分），无 UI 节点，
-  读值用 `t.ocr(y_lo, y_hi)` 按 x 列匹配（选中行 y≈1604、行距 97px、四列 x≈608/778/1126/1297
-  —— TB323FU 实测值，换机型/版本需重探）
-- **改值用点按 ±1**：点选中行下方一格=+1、上方一格=-1，每次点完 OCR 复核再点（参考 `179.py → tap_increment`），
-  比滑动稳（滑动易过头）
-- 修改任一小节点「确定」后会弹**「是否自动调整其他课程」**确认框 → 点「确定」（真实产品流程，不是干扰弹窗）。
-  同步规则（实测）：第1节结束改 :53 后上午后续节 = 前节结束 + 课间休息
+  读值用 `t.ocr(y_lo, y_hi)` 按 x 列匹配（选中行 y≈1604、行距 97px、
+  四列 x≈608/778/1126/1297 [TB323FU/9.0.0.83]）
+- **改值用点按 ±1**：点选中行下方一格=+1、上方一格=-1，每次点完 OCR 复核再点
+  （参考 `179.py → tap_increment`），比滑动稳（滑动易过头）
+- 修改任一小节点「确定」后会弹**「是否自动调整其他课程」**确认框 → 点「确定」（真实产品流程，
+  不是干扰弹窗）。同步规则（实测）：第1节结束改 :53 后上午后续节 = 前节结束 + 课间休息
   （08:00-08:53 → 09:03-09:53 → 10:03-10:53 → 11:03-11:53），下午/晚上不受影响，
   「每节课上课时长」仍显示 50分钟
 - **冲突表现（第4节结束 > 下午开始）**：冲突两节的时间文字**变红**（UI 树无色值，用视觉断言）；
   点右上角「完成」→ toast **「课程时间有冲突，无法设置」**（实测文案，窗口 ~2-3s，
   动作后立即 `capture_toast` 抓，OCR 匹配「冲突」即可）
 - ⚠️ 本页右上角「完成」= `save_view`，**bounds 中心点击无反应**（实测 2 次），
-  偏移 (+61,+31) 才触发 toast（TB323FU 实测；热区偏移，换机型先用小探针校准再写用例）
+  偏移 (+61,+31) 才触发 toast [TB323FU/9.0.0.83]（热区偏移，换机型先用小探针校准再写用例）
 - ⚠️ 触发这个 toast 的点击必须带 **`observe=False`**（`tap_xy/tap_text(..., observe=False)`）：
   默认点击链的弹窗检查窗口(~1.5s)+截图会占满 toast 的 ~2s 显示窗口，capture_toast 必抓空
   （AB 隔离实验实锤：同坐标同连接，带检查链无 toast、禁用后有）
 
-### 课程提醒时间
+## 课程提醒时间
 
 入口在**确认页**，不在课程时间设置页。点开是单选列表（非 Canvas，文本可读）:
 `不提醒 / 任务发生时 / 5分钟前 / 15分钟前 / 30分钟前`，默认 5分钟前，底部有「取消」。
 
 ## 时间选择器（Canvas 双滚轮，新建课程/时段设置）
 
-- 左滚轮: 开始时间（小时+分钟）；右滚轮: 结束时间 —— 别混淆
-- 中间高亮 = 当前选中；上方数字更小、下方更大
-- 点按上/下方数字直接切换，比滑动准；滑动极易过头
-- 例: 分钟轮中间 08 想设 05 → 点 08 上方两个位置的数字
-- 例: 20 改 30 → 点 20 下方数字或上滑 1 格
+- 左滚轮: 开始时间（小时+分钟）；右滚轮: 结束时间 —— 别混淆；中间高亮 = 当前选中
+- 操作手法（点按 ±1、零惯性）是跨 App 通用技法，见 SKILL.md「Canvas 控件」节，本卡不重复
 - 上课周数弹窗是 1-20 周网格，点按切换；「单周/双周/全选」可批量
 - 被其他课程占用的周次点不动 —— 正常业务保护，不是 Bug
 
@@ -163,52 +164,39 @@ Activity: `com.zui.calendar/.timetable.management.TimeSlotSettingsActivity`
 **通用机制（按钮文案会变、必须先拒绝后允许、一律正则点击）见 `knowledge/_system.md`
 「运行时权限弹窗」小节 —— 那是跨 App 系统行为，改那里就好，本卡不复制。**
 
-本 App 实测到的具体文案（2026-09-02 TB323FU，Android 17）：
+本 App 实测到的具体文案（TB323FU / Android 17）:
 
 - CAMERA 首次: 仅在使用时允许 / 仅本次使用时允许 / **拒绝**
 - CAMERA 拒绝后再请求: 仅在使用时允许 / 仅本次使用时允许 / **拒绝并不再询问**
 - MEDIA 首次: 选择照片 / 全部允许 / **拒绝**
 - MEDIA 拒绝后再请求: 选择照片 / 全部允许 / **拒绝并不再询问**
 - `pm revoke` 后弹窗仍会出现（flags 只带 `USER_SET`），但按钮已是「拒绝并不再询问」形态
+- 拒绝后 App 自弹提示框（非系统弹窗），可作「提示需要授予权限」的断言对象
 
-拒绝后 App 自己的提示框（不是系统弹窗，用于断言「提示需要授予权限」）：
+## 空课表周视图（TimetableActivity，手动创建保存后到达）
+
+- toolbar 标题 = 课表名，右侧/副行 = 当前周数（第1周）
+- 结构: viewPager + 表头周几（tv_monday…tv_friday + _date）+ recyclerView 网格
+  （tv_section 节号 1-8 + tv_time 时间）
+- 空格子 = `cv_empty_content`（clickable）。**点空格后出现加号浮标 `iv_add_hint`，
+  再点加号才进添加课程**，不是直接点空格弹框。「+」是图无文本/desc，判定用 rid 而非文本
+- 顶栏 import/设置: `action_curriculum_table_import` / `action_curriculum_table_settings`
+
+## 添加课程页（EditCourseActivity「新建课程」）
+
+- 字段 rid: 课程名 `etCourseName`（必填）/ 教室 `etClassroom` / 备注(老师) `etTeacher`；
+  课程时间 `llCourseTime` / `tvCourseTime`（默认"第1节"，点开选节段）；
+  上课周数 `llCourseWeeks` / `tvCourseWeeks`（默认"第1-20周"）；
+  背景色 `llCourseColor`（行显示当前色 `viewColorIndicator`）
+- 「课程背景色」点行弹出**独立 AlertDialog**（App 自定义样式，rid 均 com.zui.calendar:id/*，
+  含 alertTitle / customPanel / buttonPanel）。customPanel 内 5×2=10 个纯色块
+  （clickable FrameLayout，无文本/desc）。**数色块用视觉模型**: UI 树数 clickable 会被
+  嵌套/装饰节点干扰（实测 25≠10），像素/文本判定不可靠；`vision_ask` 裁 customPanel 区域
+  数色得 '10' 精确
 
 ## 通用对话框
 
 - 页面右上角「完成」= 保存并返回；对话框里「确定」= 确认当前选择
-- 权限弹窗约 8s 自动消失，出现必须立即点（框架看门狗 `start_watchdog()` 检测即点）
-- 从相机返回：相机返回键可能被取景器吃掉，`am force-stop com.zui.camera` 更快更稳；
-  且退回的是日历主界面（不是课程表页），需重新走「更多 → 课程表」
-
-## 跨应用出口
-
-- 课程/时段设置中若出现「附件/文件」入口 → 系统「打开方式」选择器 → 可能进入文件管理器
-- 从文件管理器返回后应回到原界面（Back 或页面返回键）
-
-## 176 手动创建 → 添加课程（2026-09-03 实测）
-
-### 手动创建链路（差异注意）
-- 手动创建入口 = 课程表空列表「手动创建课程表」`btnCreateManually` → EditTimetableActivity「新建课程表」页。
-- **该页 et_schedule_name 默认空且必填**：不填点「完成」会被校验拦住（页面不动）。
-  用例文本若只说"点完成"，需先填名称——175 的图库导入确认页才有默认名，手动创建页没有。
-- 保存按钮 = toolbar 右侧 `action_save`（文本「完成」）。填名后直接点它，**不要按 back 收键盘**
-  （back 会直接退出 EditTimetableActivity 丢编辑，实测踩到）。
-
-### 空课表周视图（保存后）
-- Activity = `timetable.display.TimetableActivity`。toolbar 标题=课表名，右侧/副行=当前周数（第1周）。
-- 结构：viewPager + 表头周几(tv_monday…tv_friday + _date) + recyclerView 网格（tv_section 节号 1-8 + tv_time 时间）。
-- 空格子 = `cv_empty_content`（clickable）。**点空格后出现加号浮标 `iv_add_hint`**，再点加号才进添加课程，
-  不是直接点空格弹框（176 实测）。「+」是图无文本/desc，判定用 rid 而非文本。
-- 顶栏 import/设置：action_curriculum_table_import / action_curriculum_table_settings。
-
-### 添加课程页（EditCourseActivity「新建课程」）
-- 字段 rid：课程名 `etCourseName`(必填) / 教室 `etClassroom` / 备注(老师) `etTeacher`；
-  课程时间 `llCourseTime`/`tvCourseTime`（默认"第1节"，点开选节段）；上课周数 `llCourseWeeks`/`tvCourseWeeks`
-  （默认"第1-20周"）；背景色 `llCourseColor`（行显示当前色 viewColorIndicator）。
-- 「课程背景色」点行弹出**独立 AlertDialog**（App 自定义样式，rid 均 com.zui.calendar:id/* 含 alertTitle/customPanel/buttonPanel）。
-  customPanel 内 5×2=10 个纯色块（clickable FrameLayout，无文本/desc）。**数色块用视觉模型**：
-  UI 树数 clickable 会被嵌套/装饰节点干扰（实测 25≠10），像素/文本判定不可靠；
-  视觉模型裁 customPanel 区域数色得 '10' 精确（176 已用 vision_ask 验证 PASS）。
 
 ## 验证要点
 

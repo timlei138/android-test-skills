@@ -71,7 +71,8 @@ class TraceRecorderTest(unittest.TestCase):
         t0 = _t.time()
         self.rec.event("wait", "text=课程时间设置", result="timeout", start=t0)
         self.rec.event("watchdog", "词表命中 知道了", result="click")
-        lines = open(os.path.join(d, "events.jsonl"), encoding="utf-8").read().splitlines()
+        with open(os.path.join(d, "events.jsonl"), encoding="utf-8") as f:
+            lines = f.read().splitlines()
         self.assertEqual(len(lines), 3)            # session + 2 events
         e2 = json.loads(lines[1])
         self.assertEqual(e2["type"], "wait")

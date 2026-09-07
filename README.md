@@ -7,11 +7,11 @@ Android 设备黑盒 GUI 测试技能包：**你给测试用例，它驱动设�
 ```bash
 # 1. 装环境（自动建 venv、装依赖、初始化设备端）
 bash setup.sh
+# Windows: pwsh -File setup.ps1（脚本参数与细节见 docs/OPS.md）
 
-# 2. 跑示例用例（用例在本 skill 包 cases/<包名>/ 下，随版本同步）
-cd ~/dsh-android-test/framework
-~/dsh-android-test/.venv/bin/python run_case.py com.zui.calendar/172.py
-# → 自动生成 storage/reports/联想日历_172_报告.md
+# 2. 跑示例用例（在 skill 包根目录跑；用例在 cases/<包名>/ 下，随版本同步）
+.venv/bin/python run_case.py com.zui.calendar/172.py
+# → 报告自动生成到工作区 storage/reports/（Windows 用 pwsh -File run_case.ps1 -Case "com.zui.calendar/172.py"）
 
 # 3. 写自己的用例（参考 cases/com.zui.calendar/ 示例）
 #    新建 cases/<包名>/<编号>.py，用框架 API 表达步骤+断言，然后 run_case.py 执行
@@ -22,13 +22,13 @@ cd ~/dsh-android-test/framework
 | 能力 | 说明 |
 |---|---|
 | 元素操作 | 元素优先定位（resource-id/text/content-desc），坐标仅兜底 |
-| 弹窗看门狗 | 后台线程检测权限/引导弹窗立即点击（allow/deny 策略可切换） |
+| 弹窗看门狗 | 主流程驱动检测权限/引导弹窗立即点击（词表快路径 + 视觉模型兜底未知弹窗；allow/deny 策略可切换） |
 | 权限测试 | 相机/图库允许+拒绝路径（拆分隔离避免 USER_FIXED 级联） |
 | 断言 | 文本/开关/长度上限/置灰（像素对比度） |
 | Canvas 读取 | RapidOCR 读自绘控件（滚轮/画布文字） |
 | 滚轮操作 | 点按切换（零惯性，比滑动准） |
-| 知识卡 | 按前台包名注入 App 操作经验（界面结构/高效操作/已知坑） |
-| 结果分类 | PASS / FAIL / WARN / BLOCKED / INFO |
+| 知识卡 | 按前台包名检索 App 操作经验（检索索引/标准链路/页面控件/已知坑） |
+| 结果分类 | PASS / FAIL / WARN / BLOCKED / INFO / ERROR（异常路径也有报告） |
 | 报告 | 自动生成 Markdown，含每步结果+截图证据 |
 
 ## 目录结构
@@ -60,7 +60,7 @@ from test_framework import TestCase
 def run():
     t = TestCase("我的用例")
     t.step("步骤1")
-    t.tap_text("开始")
+    t.tap_rid("com.example.app:id/btn_start")   # rid 优先（App 自有控件禁止 text 定位）
     t.record("PASS", "点击成功")
     t.screenshot("步骤1证据")
     return t.finish()
@@ -76,24 +76,30 @@ def run():
 AI 会自动写进知识卡 / 生成用例脚本。
 
 **方式 B（技术用户）**：复制模板改
-- `knowledge/_template.md` → 新 App 知识卡
+- `knowledge/_template.md` → 新 App 知识卡（结构约定见模板内注释）
+- `knowledge/scenarios/sys.无限工作台.md` → 场景卡示例（头部键值区写法）
 - `cases/_template.py` → 新用例脚本
 
 ## 给 App 积累知识卡
 
-用户口述的 App 操作经验记录到 `knowledge/<包名>.md`（Markdown，自由格式）：
+用户口述的 App 操作经验记录到 `knowledge/<包名>.md`（结构按 `knowledge/_template.md`）：
 ```markdown
 - **app**: com.zui.calendar
+- **验证版本**: 9.0.0.83（TB323FU）
+
+## 检索索引
+滚轮、时间选择器、权限、导入、冲突…
 
 ## 导航入口
-- 课程表: 主页 → 右上角"更多" → 弹窗"课程表"
-
-## 高效操作
-- Canvas 滚轮滑动会过冲，点按数字更准
+- 课程表: 主页 → 右上角"更多"（`com.zui.calendar:id/iv_more`）→ 弹窗"课程表"
 ```
+
+卡是"地图"不是"日志"：按页面/控件组织，探索后**更新既有小节**，不追加带日期/
+用例号的新段落；机型实测值（坐标/热区偏移/行距）行尾打机型戳（如 `[TB323FU/9.0.0.83]`），
+换机型先小探针校准再用。
 
 ## 环境要求
 
-- 电脑：macOS/Linux + Python 3.10+ + Android SDK platform-tools (adb)
+- 电脑：Windows / macOS / Linux + Python 3.10+ + Android SDK platform-tools (adb)
 - 设备：Android 手机/平板，开启 USB 调试并授权
 - 可选：Python 3.13 + AutoGLM 云端模型（`setup.sh --with-agent`）
