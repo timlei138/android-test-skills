@@ -503,6 +503,24 @@ class TestCasePackageInference(unittest.TestCase):
         self.assertIsNone(self._mk(None)._case_package_from_script())
 
 
+# ── db.py：库文件父目录缺失时自动创建（webui 纯前端场景回归）────────
+class TestDbMissingParentDir(unittest.TestCase):
+    """storage/ 未创建（纯 Web UI / 首次使用 / HOME 被重定向）时，
+    connect 曾直接抛 OperationalError: unable to open database file。"""
+
+    def test_connect_creates_missing_parent_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            deep = os.path.join(td, "ws", "storage", "sub")
+            dbp = os.path.join(deep, "test_records.db")
+            self.assertFalse(os.path.isdir(deep))
+            rdb = db.RecordDB(path=dbp)
+            try:
+                self.assertEqual(rdb.list_cases(), [])   # 不抛 CANTOPEN
+            finally:
+                rdb.close()
+            self.assertTrue(os.path.isfile(dbp))
+
+
 # ── vision.py：鉴权头使用真实 Key（mock HTTP，不触网、不泄露）──────
 class TestVisionAuth(unittest.TestCase):
     def test_authorization_uses_real_key(self):

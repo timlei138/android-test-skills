@@ -19,7 +19,7 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 
 ## 测试记录查询（SQLite）
 
-- 每次执行自动入库 `~/dsh-android-test/test_records.db`：用例（cases）/步骤（steps）/断言结果（results，含状态快照与证据路径）
+- 每次执行自动入库 `~/dsh-android-test/storage/test_records.db`：用例（cases）/步骤（steps）/断言结果（results，含状态快照与证据路径）。
 - 命令行查看：`framework/db.py`（`python -c "import sys; sys.path.insert(0,'framework'); from db import get_db; print(get_db().list_cases())"`）
 
 ## Web 前端（查看记录 + 编辑知识库，随 skill 打包分发）
@@ -27,7 +27,7 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 - **位置**：本 skill 包内（`webui.sh` 在包根目录，`framework/webui.py` + `framework/webui.html`）
 - **启动**：`./webui.sh` → 打开 http://127.0.0.1:8900（`stop`/`status`/指定端口）
 - **数据定位**（显式，不依赖脚本所在目录）：
-  - 环境变量 `DSH_ANDROID_TEST_DIR` 指定测试工作区（其下 `test_records.db` + 截图/报告）
+  - 环境变量 `DSH_ANDROID_TEST_DIR` 指定测试工作区（其下 `storage/` 含 test_records.db + 截图/报告）
 - 用例与知识卡单一数据源在 **skill 包** `cases/` 与 `knowledge/`，同步 skill 即获得全部；可用 `DSH_ANDROID_TEST_CASES` / `DSH_KNOWLEDGE_DIR` 覆盖
   - 默认 `~/dsh-android-test/`；知识库另可用 `DSH_KNOWLEDGE_DIR` 覆盖
   - 打包给别人：对方装好 skill 后跑 `setup.sh` 建工作区，直接 `./webui.sh` 即可
@@ -44,7 +44,7 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 |---|---|---|
 | **代码** `framework/` + 根目录脚本 + `SKILL.md` | skill 包（唯一） | Agent 加载的就是这里，改完直接生效 |
 | **资产** `cases/` + `knowledge/` | skill 包（唯一），git 兜底 | 版本历史比本地副本有用 |
-| **数据** `storage/` + `test_records.db` + `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
+| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
 
 **为什么数据不跟着进 skill 包**（看着更"单副本"，实际三个坑）：
 
@@ -64,6 +64,16 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 （PowerShell 5.1 缺 BOM 会按 GBK 解析报错）。
 
 ## Web UI 排障
+
+### 历史记录加载失败（OperationalError: unable to open database file）
+
+多半是 **Web UI 进程还在跑旧代码**——库位置调整后（test_records.db → storage/ 内）没有重启，
+旧进程按旧路径开库（文件已被迁移走）。排查与修复：
+
+1. 杀掉旧进程再重启：`pwsh -File webui.ps1 restart`（它会用 venv Python + 当前代码）。
+2. 不要用系统 Python 直启 `python webui.py`——venv 依赖不在，且绕过了启动脚本的环境设置。
+3. 框架侧已加固：`db._connect()` 会在开库前自动创建缺失的父目录
+   （纯 Web UI / 首次使用 / HOME 被重定向的环境里 storage/ 可能还没建出来）。
 
 ### Web UI 改了却没生效 —— 按顺序查这两条
 

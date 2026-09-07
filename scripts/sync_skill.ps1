@@ -13,7 +13,7 @@
 #
 # 不同步（内容/运行产物，各居其位）：
 #   cases/ knowledge/  → 只在 skill 包（单一数据源，随版本同步）
-#   storage/ .venv/ test_records.db → 只在工作区（运行产物，机器私有）
+#   storage/（含 test_records.db） .venv/ → 只在工作区（运行产物，机器私有）
 
 param([switch]$ToSkill)
 

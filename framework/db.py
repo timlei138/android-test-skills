@@ -4,8 +4,8 @@
 零依赖（标准库 sqlite3）。
 
 数据库位置（按优先级）：
-  1. 环境变量 DSH_ANDROID_TEST_DIR（测试工作区根，其下 test_records.db）
-  2. 默认 ~/dsh-android-test/test_records.db
+  1. 环境变量 DSH_ANDROID_TEST_DIR（测试工作区根，其下 storage/test_records.db）
+  2. 默认 ~/dsh-android-test/storage/test_records.db
 
 显式定位而非相对路径推导：本模块可能在 skill 包或工作区任意位置被加载，
 只有显式路径才能保证读的是同一个库。
@@ -73,11 +73,39 @@ def safe_rmtree(path) -> bool:
 
 
 def default_db_path() -> str:
-    """测试记录数据库路径。"""
-    return os.path.join(default_test_dir(), "test_records.db")
+    """测试记录数据库路径：<工作区>/storage/test_records.db（与截图/报告同区）。"""
+    return os.path.join(default_test_dir(), "storage", "test_records.db")
+
+
+def _migrate_legacy_db():
+    """旧布局迁移：test_records.db 曾放在工作区根，统一挪进 storage/。
+
+    新路径已存在 → 什么都不做（幂等）。旧文件搬不动（如被运行中的 Web UI
+    锁住）→ 退化为复制：老连接继续用旧文件，新连接用副本——宁可暂时双份，
+    也不能让新路径开出一个空库、历史记录"看起来丢了"。
+    """
+    import shutil
+    old = os.path.join(default_test_dir(), "test_records.db")
+    new = default_db_path()
+    if not os.path.isfile(old) or os.path.isfile(new):
+        return
+    try:
+        os.makedirs(os.path.dirname(new), exist_ok=True)
+        for suffix in ("", "-wal", "-shm"):
+            src = old + suffix
+            if os.path.isfile(src):
+                shutil.move(src, new + suffix)
+        print(f"[db] 已迁移旧库: {old} → {new}")
+    except OSError as e:
+        print(f"⚠️ [db] 旧库迁移失败，退化为复制（原文件保留）: {e}")
+        try:
+            shutil.copy2(old, new)
+        except OSError as e2:
+            print(f"⚠️ [db] 旧库复制也失败: {e2}（旧文件仍在 {old}，可手动迁移）")
 
 
 DB_PATH = default_db_path()
+_migrate_legacy_db()
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cases (
@@ -171,6 +199,13 @@ class RecordDB:
 
     def _connect(self):
         if not hasattr(self._local, 'conn') or self._local.conn is None:
+            # sqlite 无法在不存在的目录里建库（CANTOPEN: unable to open
+            # database file）。库在 storage/ 子目录下，而 storage/ 只有用例
+            # 跑过才会创建——纯 Web UI / 首次使用 / HOME 被重定向的环境里
+            # 它可能不存在，这里兜底建目录。
+            parent = os.path.dirname(os.path.abspath(self.path))
+            if not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
             self._local.conn = sqlite3.connect(self.path, check_same_thread=False)
             self._local.conn.executescript(_SCHEMA)
             # 幂等迁移：旧库补列（列已存在时 ALTER 抛错，忽略即可）

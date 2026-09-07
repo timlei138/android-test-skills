@@ -206,7 +206,7 @@ python cases/_lib/inventory.py <包名> verify <label> --rids tv_x --texts "按�
 
 ## 测试记录（SQLite）与 Web 前端
 
-- 每次执行自动入库 `~/dsh-android-test/test_records.db`（用例/步骤/断言结果，含状态快照与证据路径）
+- 每次执行自动入库 `~/dsh-android-test/storage/test_records.db`（用例/步骤/断言结果，含状态快照与证据路径）
 - Web 测试台：`./webui.sh`（Windows：`pwsh -File webui.ps1 start`）→ http://127.0.0.1:8900
   - **测试记录**页：用例列表 → 详情含 用户输入/脚本/状态/证据
   - **知识库**页：编辑 `knowledge/*.md`（`_template.md` 只读；`_system.md` 禁删可编辑）
@@ -221,7 +221,7 @@ python cases/_lib/inventory.py <包名> verify <label> --rids tv_x --texts "按�
 |---|---|---|
 | **代码** `framework/` + 根目录脚本 + `SKILL.md` | skill 包（唯一） | Agent 加载的就是这里，改完直接生效 |
 | **资产** `cases/` + `knowledge/` | skill 包（唯一） | 版本历史（git）比本地副本有用 |
-| **数据** `storage/` + `test_records.db` + `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
+| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
 
 **代码唯一权威是 skill 包**：`run_case.ps1` 的搜索顺序是 skill 包在前、工作区备份在后。
 反过来排会导致「改了 skill 包、跑用例却命中工作区旧副本」的静默失效，**别改回去**
