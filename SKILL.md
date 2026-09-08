@@ -440,7 +440,7 @@ AI 结构化落盘：知识写入 `knowledge/<包名>.md` 对应小节（更新�
 - **既有链路 sleep 属 settle 型可保留**：`cases/<包名>/_flow.py` 等既有链路里的固定 sleep（如冷启动 4s、页面转场 3s）是无元素信号的 settle 等待，数值来自真机实测调优（PhotoPicker 首次冷启动、图片解析等场景没有可条件等待的 rid）。复用这些链路时保持原值；改数值需真机回归。新写代码仍遵守上一条：优先条件等待，sleep 必须带注释。
 - **每步操作后统一等待 ≥1s 再截图或 dump UI**：任何点击/输入/启动/返回等操作后，先 `time.sleep(ACTION_DELAY)`（=1s）等界面动画/转场稳定，再截图或 dump_hierarchy；否则会因界面未渲染完而误判（如首启权限页还没出现就 dump，误认为"无弹窗"）。AI 写用例脚本时必须遵守，禁止"操作后立即 dump/截图"。
 - **多设备**：`TestCase(device_id=None)` 时要求恰好一台已授权设备；零台/多台会在启动时直接报错。多台时必须 `TestCase("名", device_id="serial")` 显式指定——框架内所有 adb/u2 操作都绑定同一 serial，操作、断言、截图证据不会跨设备分家。报告与 SQLite 记录 serial/型号/Android 版本/屏幕尺寸。
-- 屏幕可能锁屏：框架已自动唤醒解锁
+- **屏幕锁屏（已自动防护）**：长用例执行中设备可能因休眠超时被锁屏，导致后续 adb/u2 交互打到 keyguard、dump 读不到 App 节点 → 元素定位失败、用例误判 FAIL/BLOCKED。框架已内置两层防护：① `TestCase.__init__` 执行 `svc power stayon true`，USB 供电期间屏幕常亮、从源头不锁屏；② 每次读屏(`_dump`)/截屏(`_screencap_bytes`)前自动调用 `ensure_awake()`（3s 节流）兜底唤醒+解 keyguard。**注意**：`stayon` 仅 USB 供电时生效；若设备拔线用电池跑、或设了安全锁屏(PIN/图案)，仍可能锁屏——此时需人工解锁或保持供电。
 - `d.info` 在 Android 15+ 可能崩溃：用 `app_current`/`dump_hierarchy` 替代
 - 坐标以 u2 dump bounds 为准；选择器等系统 UI 布局可能变化 → 用 `first_clickable`/OCR 动态定位，不用写死坐标
 - 无法操作时（设备离线/无网络等）：如实标注 BLOCKED 并说明原因，不编造结果
