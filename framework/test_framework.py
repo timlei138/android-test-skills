@@ -168,6 +168,15 @@ class TestCase:
                        capture_output=True)
         subprocess.run(self._adb("shell", "wm", "dismiss-keyguard"),
                        capture_output=True)
+        # 防锁屏保活（根因防护）：USB 供电期间保持屏幕常亮，
+        # 避免长用例执行中设备因休眠超时被锁屏，导致后续 adb/u2 交互打到
+        # keyguard、dump 读不到 App 节点、元素定位失败 → 用例莫名 FAIL/BLOCKED。
+        try:
+            subprocess.run(self._adb("shell", "svc", "power", "stayon", "true"),
+                           capture_output=True, timeout=10)
+        except Exception:
+            pass
+        self._awake_last = 0.0       # ensure_awake 节流基准
         time.sleep(0.5)
         self.d = u2.connect(self.serial)
         # 设备信息（报告与数据库留痕：操作/断言/证据属于哪台机器）
@@ -247,6 +256,29 @@ class TestCase:
         """构造绑定本用例 serial 的 adb 命令列表。"""
         return ["adb", "-s", self.serial, *args]
 
+    # ── 防锁屏保活（跑用例期间屏幕必须保持点亮）──────────────────────
+    # 失败根因：长用例执行过程中设备因休眠超时被锁屏，后续 adb/u2 交互打到
+    # keyguard，dump 读不到 App 节点 → 元素定位失败 → 用例莫名其妙 FAIL/BLOCKED。
+    # 两层防护：
+    #   1) __init__ 里 svc power stayon true：USB 供电期间屏幕常亮，从根上不锁屏；
+    #   2) ensure_awake()：每次读屏/截屏前兜底唤醒 + 解 keyguard，节流下发。
+    # 纯通用机制（与具体 App/用例无关），不抛异常（保活失败不应中断用例）。
+    def ensure_awake(self, throttle=3.0):
+        """保活：唤醒屏幕并解除 keyguard，防锁屏导致交互失败。
+        throttle：内部节流，N 秒内不重复下发命令，可安全高频调用。"""
+        now = time.time()
+        last = getattr(self, "_awake_last", 0.0)
+        if (now - last) < throttle:
+            return
+        self._awake_last = now
+        try:
+            subprocess.run(self._adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"),
+                           capture_output=True, timeout=5)
+            subprocess.run(self._adb("shell", "wm", "dismiss-keyguard"),
+                           capture_output=True, timeout=5)
+        except Exception as e:
+            print(f"[ensure_awake] 保活命令失败（不影响主流程）: {e}")
+
     def _dump(self):
         """UI 树采集统一入口：计数 + 单点 dump。
 
@@ -256,6 +288,8 @@ class TestCase:
         trace 模式开启时（set_trace），每次 dump 快照落盘到采集会话档案，
         供事后排查 / 补料（见 _trace_snapshot）。
         """
+        # 读屏前保活：确保屏幕未锁，否则拿到的会是 keyguard 节点而非 App 界面
+        self.ensure_awake()
         # 单测用 object.__new__(TestCase) 绕过 __init__，此计数属性可能缺失；
         # 惰性补齐，避免纯逻辑单测因未初始化而报错。
         if not hasattr(self, "_dump_count"):
@@ -1146,6 +1180,7 @@ class TestCase:
     def _screencap_bytes(self):
         """当前屏幕 PNG 字节（绑定本用例 serial）。截屏统一入口，
         供 _auto_screenshot / ocr / vision 复用，避免各自裸拼 adb。"""
+        self.ensure_awake()   # 截屏前保活，避免截到锁屏界面
         return subprocess.run(self._adb("exec-out", "screencap", "-p"),
                               capture_output=True).stdout
 
