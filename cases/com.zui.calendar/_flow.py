@@ -164,8 +164,37 @@ def restart_calendar(t, pm_clear=True):
     t.launch_app(PKG)
     time.sleep(4)    # settle：等冷启动首帧 + 首启权限弹窗（无 rid 可条件等待）
     t.dismiss_first_use_dialogs(policy="allow", max_rounds=12, verbose=False)
+    _dismiss_permission_guide(t)   # App 专属首启权限引导框（退出/同意），盖主页会挡住菜单
+    t.dismiss_first_use_dialogs(policy="allow", max_rounds=8, verbose=False)  # 同意后可能拉系统权限弹窗
     _sleep(1.5)
     return True
+
+
+def _dismiss_permission_guide(t, timeout=8):
+    """关掉 App 专属首启权限引导框「日历需要使用以下权限」（退出/同意）。
+
+    该框是 App 自有 UI（非系统运行时权限弹窗），冷启动 pm_clear 后必现，
+    会盖住主页导致 tap_more_menu 打不开菜单（174 实测 BLOCKED 入口）。
+    框架 dismiss_first_use_dialogs 依赖 dialog_words 命中 同意 文本、且只在其
+    轮询窗口内有效——引导框晚于该窗口出现就会漏掉。这里显式锚定标题处理更稳。
+    点「同意」后 App 可能拉起系统运行时权限弹窗（允许/拒绝），交由随后的
+    dismiss_first_use_dialogs 二次清扫；本函数只负责移除引导框本身。
+    无引导框（如非 pm_clear 的重跑）在 2.5s 内未检出即提前退出，不空等。
+    """
+    start = time.time()
+    while time.time() - start < timeout:
+        txt = " ".join(t.screen_text())
+        if "需要使用以下权限" in txt and "同意" in txt:
+            if t.tap_text("同意", wait=2, silent=True):
+                time.sleep(1.2)
+                return True
+            # 点不到再轮询一次（可能看门狗/其它机制抢先点掉）
+        elif time.time() - start > 2.5:
+            # 超过 2.5s 仍无引导框 → 本次冷启动未出现（如未 pm_clear），提前退出
+            return False
+        time.sleep(0.8)
+    return False
+
 
 
 def goto_课程表空状态(t, pm_clear=True):
