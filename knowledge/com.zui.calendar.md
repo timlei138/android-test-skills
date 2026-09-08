@@ -85,6 +85,14 @@
   完成 `btn_finish`、学期开始 `layout_semester_start_date` / `tv_semester_start_date`、
   当前周数 `layout_current_week` / `tv_current_week`、总周数 `layout_total_weeks` / `tv_total_weeks`、
   周末有课 `switch_weekend_classes`、显示非本周 `switch_show_non_current_week`
+- **学期总周数弹框 = 滚轮选择器**（174 实测）：当前值居中高亮蓝色，上下各露出 ±1（如 19/20/21）；
+  数字为 Canvas 绘制 **dump 读不到**（dump 只有 学期总周数/取消/确定）→ 用 `ocr()` 定位数字坐标
+  `tap_xy` 点选（部分滚轮不支持点选则 `input swipe` 上滑一格兜底）→「确定」提交后 `tv_total_weeks` 变化
+- **必填校验行为（174 实测，与规格不符）**: 名称清空后「完成」按钮**不置灰**
+  （视觉为可点击态、dump `enabled=true`），点击后**停留确认页被校验拦截**（与手动创建页行为一致）。
+  规格写「必填为空完成置灰」时按用例为准记 FAIL，注明"实际未置灰、点击被拦截"
+- 确认页展示值示例（TB323FU/9.0.0.83/2026-09-08）: 学期开始 `2026年09月01日`、当前周数 `第2周`、
+  总周数 `20周`；学期开始点开为系统 DatePicker（`android.widget.DatePicker` 类，「取消」关闭
 
 ### 拍照导入（到相机拉起）
 
@@ -103,8 +111,11 @@
 坑全在目标页:
 
 - 名称默认空且**必填**：不填点「完成」会被校验拦住（页面不动）；图库导入确认页才有预填名
-- 保存 = toolbar 右侧 `action_save`（文本「完成」），**不是** `btn_finish`
+- 保存 = toolbar 右侧 `save_view`（文本「完成」，clickable），**不是** `btn_finish`；
+  `action_save` 是其不可点父容器，用例里点 `save_view`
 - **不要按 back 收键盘**——back 会直接退出 EditTimetableActivity 丢编辑（实测踩到）
+- 两个开关**默认均关闭**（177 实测：`switch_weekend_classes`/`switch_show_non_current_week`
+  checked=false）；图库导入确认页「显示非本周课程」因导入样本数据可能默认开启，二者默认态不同
 
 ### 确认页导航关系（页面拓扑）
 
