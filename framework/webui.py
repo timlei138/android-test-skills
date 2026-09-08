@@ -61,7 +61,8 @@ def _vision_conf_path() -> str:
 
 
 # 默认值与 vision.py 保持一致；留空表示该字段不覆盖（沿用 vision.py 内置默认）
-VISION_DEFAULTS = {"base_url": "", "model": "", "api_key": ""}
+# tap_strategy 是视觉定位策略（som/coordinate/auto），vision.py 白名单已收录
+VISION_DEFAULTS = {"base_url": "", "model": "", "api_key": "", "tap_strategy": ""}
 
 
 def _load_vision_conf() -> dict:
@@ -88,13 +89,16 @@ def _mask(s: str) -> str:
     return s[:4] + "*" * (len(s) - 8) + s[-4:]
 
 
-def _save_vision_conf(base_url, model, api_key) -> tuple:
-    """保存配置。api_key 为空时保留原值（避免用户只想改 model 却清空密钥）。"""
+def _save_vision_conf(base_url, model, api_key, tap_strategy="") -> tuple:
+    """保存配置。api_key 为空时保留原值（避免用户只想改 model 却清空密钥）。
+    tap_strategy 非法值归一为 auto（运行时 resolve_strategy 也会兑底）。"""
     conf = _load_vision_conf()
     conf["base_url"] = (base_url or "").strip()
     conf["model"] = (model or "").strip()
     if (api_key or "").strip():
         conf["api_key"] = api_key.strip()
+    ts = (tap_strategy or "").strip()
+    conf["tap_strategy"] = ts if ts in ("som", "coordinate", "auto") else "auto"
     fp = _vision_conf_path()
     os.makedirs(os.path.dirname(fp), exist_ok=True)
     with open(fp, "w", encoding="utf-8") as f:
@@ -517,6 +521,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json({
                 "base_url": conf["base_url"],
                 "model": conf["model"],
+                "tap_strategy": conf.get("tap_strategy") or "auto",
                 # 明文绝不外传；前端用 has_key 判断是否已配置
                 "api_key_masked": _mask(conf["api_key"]),
                 "has_key": bool(conf["api_key"]),
@@ -679,13 +684,15 @@ class Handler(BaseHTTPRequestHandler):
                     payload.get("base_url"),
                     payload.get("model"),
                     payload.get("api_key"),
+                    payload.get("tap_strategy"),
                 )
             except OSError as e:
                 self._json({"error": f"写入失败：{e}"}, 500)
                 return
             self._json({"ok": True, "path": fp,
                         "api_key_masked": _mask(conf["api_key"]),
-                        "has_key": bool(conf["api_key"])})
+                        "has_key": bool(conf["api_key"]),
+                        "tap_strategy": conf.get("tap_strategy") or "auto"})
         elif path == "/api/vision/test":
             # 连通性自检：用当前配置发一个最小请求，不落盘
             conf = _load_vision_conf()

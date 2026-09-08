@@ -154,7 +154,8 @@ def _resolve_serial(device_id=None):
 
 
 class TestCase:
-    def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None):
+    def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None,
+                 vision=None):
         self.name = name
         # 未显式传入时，从环境变量取（run_case.py 注入：用户原始输入 + 脚本路径）
         self.user_input = user_input if user_input is not None \
@@ -209,6 +210,11 @@ class TestCase:
         # （set_trace 开启后 dump 快照全落盘 + events.jsonl + index.json）
         from trace_recorder import TraceRecorder
         self.trace = TraceRecorder(STORAGE_DIR)
+        # 视觉模型路由（VisionProvider）：用户配置（vision.json）> Agent 注入。
+        # vision= 参数只在生成期/调试期由 Agent 注入（建议实现 ask/ask_json，
+        # 契约见 vision_provider.py 模块头）；run_case 独立执行时无 Agent 在环，
+        # 只能依赖用户配置——缺失时视觉链路降级 WARN，不升级为 ERROR。
+        self._agent_vision = vision
         self._vision = None
         # 弹窗 watcher 状态：单连接 + 主流程驱动，无独立线程、无并发 dump
         self._wd_enabled = False
@@ -344,43 +350,30 @@ class TestCase:
         except Exception:
             return self.serial
 
-    # ── 视觉模型通道（颜色/布局/OCR 盲区检查）────────────────────────
+    # ── 视觉模型通道（颜色/布局/OCR 盲区检查 + 视觉定位）──────────────
     def _get_vision(self):
-        """懒加载视觉模型客户端（deepseek-v4-flash-vision-exp）"""
+        """懒加载视觉调用统一入口（VisionProvider）：用户配置 > Agent 注入。
+        视觉模型不可用时 ask/ask_json 抛 RuntimeError，由各调用方 catch
+        降级 WARN——视觉链路是增强通道，缺配置不该把用例打成 ERROR。"""
         if self._vision is None:
-            from vision import Vision
-            self._vision = Vision()
+            from vision_provider import VisionProvider
+            self._vision = VisionProvider(
+                agent_vision=getattr(self, "_agent_vision", None))
         return self._vision
 
-    def _vision_crop_bytes(self, rid=None, bounds=None):
-        """截取屏幕（或裁剪到元素区域），返回 PNG 字节。
-        优先按元素 bounds 裁剪：聚焦目标、省 token、判断更准。"""
-        raw = self._screencap_bytes()
-        if not (rid or bounds):
-            return raw
+    def vision_ask(self, prompt, rid=None, bounds=None):
+        """通用视觉问答：截图（可裁剪到元素）→ 文本结论。
+        走公共截图管线（screenshot.py）；裁剪保留几何信息（offset/scale），
+        问答场景无需坐标换算。"""
+        from screenshot import capture, crop_bounds, encode_base64
+        screen = capture(self)
         b = bounds
-        if b is None:
+        if b is None and rid:
             v = self.read_rid(rid)
             b = v["bounds"] if v else None
-        if not b:
-            return raw
-        try:
-            from PIL import Image
-            import io
-            img = Image.open(io.BytesIO(raw)).convert("RGB")
-            x1, y1, x2, y2 = b
-            x1, y1 = max(0, x1 - 20), max(0, y1 - 20)
-            x2, y2 = min(img.width, x2 + 20), min(img.height, y2 + 20)
-            crop = img.crop((x1, y1, x2, y2))
-            buf = io.BytesIO()
-            crop.save(buf, format="PNG")
-            return buf.getvalue()
-        except Exception:
-            return raw
-
-    def vision_ask(self, prompt, rid=None, bounds=None):
-        """通用视觉问答：截图（可裁剪到元素）→ 文本结论"""
-        return self._get_vision().ask(prompt, self._vision_crop_bytes(rid=rid, bounds=bounds))
+        if b:
+            screen = crop_bounds(screen, b)
+        return self._get_vision().ask(prompt, encode_base64(screen))
 
     def assert_visual(self, prompt, expect, msg="视觉断言", rid=None, bounds=None):
         """视觉断言：让视觉模型判断截图状态，期望命中关键词（expect 可含多个任一词）。
@@ -501,8 +494,9 @@ class TestCase:
         self._ai_dialog_last = now
         self._event("watchdog", "词表未命中疑似弹窗 → AI 视觉识别", result="ai_call")
         try:
-            raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                                 capture_output=True).stdout
+            # 收口到统一截屏入口：继承 ensure_awake 锁屏防护与 serial 绑定
+            # （旧实现裸拼 adb exec-out screencap 是旁路漏网）。
+            raw = self._screencap_bytes()
             res = self._get_vision().ask_json(
                 "这是 Android 设备截图。仅当屏幕上出现【模态弹窗/对话框】（居中浮层，"
                 "背景变暗被遮罩，通常带标题和确定/取消按钮）时 is_dialog 才为 true。"
@@ -835,6 +829,118 @@ class TestCase:
         self._log_action("tap", f"x={x}, y={y}", t0)
         self._auto_screenshot(f"点击坐标_{x}_{y}")
         return True
+
+    def tap_vision(self, description, repeat=1, repeat_interval=0.15, verify="",
+                   bounds=None, crop_dialog=True, prefer_ocr=False,
+                   observe=True, silent=False, timeout=30.0):
+        """视觉定位点击（最后手段；优先 tap_el/tap_text/tap_rid）。
+
+        适用：view tree 与 OCR 均无法定位的元素（Canvas/色盘/无文字图标/
+        WebView 私有控件）。返回 bool：成功 True；失败（模型不可用/解析
+        失败/verify 未通过）时 silent=False 记 WARN 并返回 False，不抛
+        ERROR——视觉链路是增强通道，缺失时用例应继续走其他断言。
+        observe 与 silent 正交，语义与 _tap_unified 一致。
+
+        description     : 自然语言描述目标（如 "紫色色块"）
+        repeat          : 同坐标连点次数（每次独立走 observe 复核链）
+        repeat_interval : 连点间隔秒（防系统合并连续 tap 事件）
+        verify          : 点击后让视觉模型判断的陈述句（非空时点后再截图问证）
+        bounds          : 限定搜索区域 (x1,y1,x2,y2)（设备坐标）
+        crop_dialog     : 无显式 bounds 时自动裁剪到弹窗区（UI 树识别
+                          Panel 类容器；识别失败回退全屏，不阻塞）
+        prefer_ocr      : 预留 P2 的 OCR 快速通道（当前未生效，勿依赖）
+        observe         : 点击后弹窗检查/截图/延迟（与 _tap_unified 同义）
+        silent          : 失败不记 WARN（调用方有自己的 FAIL 分支时用）
+        timeout         : 视觉调用超时秒（传导至 VisionProvider → Vision）
+
+        示例:
+            if not self.tap_vision("紫色色块"):
+                return self.record("FAIL", "视觉点击未命中目标")
+        """
+        t0 = time.time()
+        if prefer_ocr:
+            print("[tap_vision] prefer_ocr 快速通道为 P2 能力，当前未启用，走视觉模型定位")
+        try:
+            from screenshot import capture, crop_bounds, resize_for_vision
+            from vision_tap import (_coordinate_tap, _som_tap,
+                                    find_dialog_bounds, resolve_strategy)
+        except ImportError as e:
+            if not silent:
+                self.record("WARN", f"tap_vision 依赖缺失: {e}")
+            return False
+        vp = self._get_vision()
+        if not vp.available():
+            if not silent:
+                self.record("WARN", f"视觉模型不可用（未配置且未注入 Agent vision）: "
+                                    f"{description!r}")
+            return False
+        try:
+            # 1. 截图（复用 _screencap_bytes，继承锁屏防护与 serial 绑定）
+            screen = capture(self)
+            # 2. 裁剪：显式 bounds > 弹窗自动识别 > 全屏
+            if bounds:
+                screen = crop_bounds(screen, bounds)
+            elif crop_dialog:
+                db = find_dialog_bounds(self._dump(), screen.original_size)
+                if db:
+                    screen = crop_bounds(screen, db)
+            # 3. 策略与定位（tap_strategy 显式配置优先，auto 按模型名启发）
+            strategy = resolve_strategy(vp.model_name(), explicit=vp.tap_strategy())
+            if strategy == "coordinate":
+                screen = resize_for_vision(screen)   # 坐标策略输出比例，允许压缩
+                x, y, reason = _coordinate_tap(vp, screen, description, timeout=timeout)
+            else:                                     # som（默认）：不压缩（scale=1.0）
+                x, y, reason = _som_tap(vp, screen, description, timeout=timeout)
+            # 4. 决策留痕（坐标/策略/模型/reason 进时间轴与 DB，事后可复盘）
+            self._log_action(
+                "tap_vision",
+                f"desc={description!r} strategy={strategy} -> ({x},{y}) "
+                f"model={vp.model_name()!r} reason={reason}",
+                t0)
+            # 5. 执行点击（tap_xy 内部自带 observe 链与点击后截图）
+            ok = True
+            for i in range(max(1, int(repeat))):
+                if i:
+                    time.sleep(repeat_interval)
+                ok = self.tap_xy(x, y, observe=observe) and ok
+            # 6. verify：点后再截图问视觉模型，作为断言证据
+            if verify and ok:
+                ok = self._tap_vision_verify(verify, bounds=bounds, timeout=timeout)
+            return ok
+        except Exception as e:
+            if not silent:
+                self.record("WARN", f"tap_vision 失败: {description!r} ({e})")
+            return False
+
+    def _tap_vision_verify(self, verify, bounds=None, timeout=None):
+        """tap_vision 的点击后验证：截新图让视觉模型判断陈述真假。
+
+        通过记 INFO（不占断言计数，verify 证据是辅助性判断）；未通过记
+        WARN 并使 tap_vision 返回 False；验证链路本身异常同样返回 False
+        （显式要求的验证没完成，结果不可信）。"""
+        try:
+            from screenshot import capture, crop_bounds, encode_base64
+            screen = capture(self)
+            if bounds:
+                screen = crop_bounds(screen, bounds)
+            data = self._get_vision().ask_json(
+                f"点击操作后的 Android 截图。请判断以下陈述是否为真：\n{verify}\n"
+                f"只输出 JSON: {{\"answer\": true 或 false, \"reason\": \"简短依据\"}}。",
+                encode_base64(screen),
+                fields=["answer", "reason"],
+                timeout=timeout,
+            )
+            ans = data.get("answer") if isinstance(data, dict) else None
+            ok = (ans is True) or (str(ans).strip().lower() in ("true", "yes", "1"))
+            reason = str(data.get("reason") or "") if isinstance(data, dict) else ""
+            if ok:
+                self.record("INFO", f"tap_vision 验证通过: {verify} ({reason})")
+            else:
+                self.record("WARN", f"tap_vision 验证未通过: {verify} ({reason})")
+            return ok
+        except Exception as e:
+            self.record("WARN", f"tap_vision 验证调用失败: {e}")
+            return False
 
     def input_text(self, rid, text, wait=5.0, silent=False):
         """点输入框并输入文本（与 tap_* 同一契约：轮询定位，返回 bool）。

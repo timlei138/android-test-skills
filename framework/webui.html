@@ -155,6 +155,15 @@
           <div class="vision-hint">需支持图片输入（vision）</div>
         </div>
         <div class="vision-row">
+          <label for="v-strategy">定位策略</label>
+          <select id="v-strategy" class="vision-input">
+            <option value="auto">auto（按模型名自动选择）</option>
+            <option value="som">som（SoM 网格，通用多模态模型）</option>
+            <option value="coordinate">coordinate（归一化坐标，专用 GUI 模型）</option>
+          </select>
+          <div class="vision-hint">tap_vision 视觉点击的定位方式；coordinate 需具备 grounding 能力的模型</div>
+        </div>
+        <div class="vision-row">
           <label for="v-key">API Key</label>
           <input id="v-key" class="vision-input" type="password" placeholder="留空则保持已保存的密钥不变" autocomplete="new-password" spellcheck="false">
           <div class="vision-hint" id="v-key-hint">尚未配置</div>

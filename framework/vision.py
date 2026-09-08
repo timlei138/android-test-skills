@@ -37,8 +37,9 @@ VISION_CONF_FILE = os.path.join(_workspace_dir(), "storage", "vision.json")
 
 
 def _load_vision_conf() -> dict:
-    """读取工作区视觉配置（base_url / model / api_key）。缺失字段返回空串。"""
-    out = {"base_url": "", "model": "", "api_key": ""}
+    """读取工作区视觉配置（base_url / model / api_key / tap_strategy）。
+    缺失字段返回空串（tap_strategy 空串 = auto，由 vision_tap.resolve_strategy 解释）。"""
+    out = {"base_url": "", "model": "", "api_key": "", "tap_strategy": ""}
     try:
         with open(VISION_CONF_FILE, encoding="utf-8") as f:
             data = json.load(f)
@@ -76,14 +77,17 @@ def _load_api_key():
 
 
 def _encode_image(image) -> str:
-    """image: 文件路径或已解码的 PNG 字节；返回 base64 data URI。"""
+    """image: 文件路径 / PNG 字节 / data URI 字符串；返回 base64 data URI。
+    data: 前缀短路：screenshot.encode_base64() 的输出可直接传入。"""
     if isinstance(image, str):
+        if image.startswith("data:"):
+            return image
         with open(image, "rb") as f:
             raw = f.read()
     elif isinstance(image, (bytes, bytearray)):
         raw = bytes(image)
     else:
-        raise TypeError("image 需为路径或 PNG 字节")
+        raise TypeError("image 需为路径、PNG 字节或 data URI")
     return "data:image/png;base64," + base64.b64encode(raw).decode()
 
 
@@ -120,18 +124,22 @@ class Vision:
         self.base_url = (base_url or conf["base_url"] or BASE_URL).rstrip("/")
         self.timeout = timeout
 
-    def ask(self, prompt: str, image, max_tokens=1024, timeout=None) -> str:
-        """通用视觉问答：prompt + 一张截图 → 文本结论。timeout 覆盖默认（秒）。"""
+    def ask(self, prompt: str, image, max_tokens=1024, timeout=None,
+            temperature=0.0) -> str:
+        """通用视觉问答：prompt + 一张截图 → 文本结论。timeout 覆盖默认（秒）。
+        temperature 默认 0.0（确定性采样）：定位/判断类任务需要稳定输出。"""
         content = [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {"url": _encode_image(image)}},
         ]
-        return self._chat(content, max_tokens=max_tokens, timeout=timeout)
+        return self._chat(content, max_tokens=max_tokens, timeout=timeout,
+                           temperature=temperature)
 
     def ask_json(self, prompt: str, image, fields: list[str], max_tokens=1024,
-                 timeout=None) -> dict:
+                 timeout=None, temperature=0.0) -> dict:
         """结构化视觉问答：要求模型只输出 JSON 对象，键为 fields。
-        timeout 覆盖默认（秒）——高风险短等待场景（如弹窗 AI 决策）可收紧。"""
+        timeout 覆盖默认（秒）——高风险短等待场景（如弹窗 AI 决策）可收紧。
+        temperature 默认 0.0（确定性采样）。"""
         schema = ", ".join(f'"{f}": 值' for f in fields)
         content = [
             {"type": "text", "text":
@@ -139,7 +147,8 @@ class Vision:
                 f"字段: {{{schema}}}。"},
             {"type": "image_url", "image_url": {"url": _encode_image(image)}},
         ]
-        text = self._chat(content, max_tokens=max_tokens, timeout=timeout)
+        text = self._chat(content, max_tokens=max_tokens, timeout=timeout,
+                           temperature=temperature)
         # 剥离可能的 ```json 围栏
         text = text.strip()
         if text.startswith("```"):
@@ -149,12 +158,14 @@ class Vision:
         except json.JSONDecodeError as e:
             raise ValueError(f"视觉模型未返回合法 JSON: {text[:200]} ({e})")
 
-    def _chat(self, content, max_tokens, timeout=None) -> str:
+    def _chat(self, content, max_tokens, timeout=None, temperature=0.0) -> str:
         body = {
             "model": self.model,
             "messages": [{"role": "user", "content": content}],
             "max_tokens": max_tokens,
         }
+        if temperature is not None:
+            body["temperature"] = temperature
         to = timeout if timeout is not None else self.timeout
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",

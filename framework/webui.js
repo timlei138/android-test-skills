@@ -698,6 +698,7 @@ async function loadVision() {
     const c = await api('/api/vision');
     $('#v-base').value  = c.base_url || '';
     $('#v-model').value = c.model || '';
+    $('#v-strategy').value = c.tap_strategy || 'auto';
     $('#v-path').textContent = c.path || '-';
     // 密钥不回填明文，仅在提示里显示掩码
     const hint = $('#v-key-hint');
@@ -728,6 +729,7 @@ async function saveVision() {
         base_url: $('#v-base').value,
         model:    $('#v-model').value,
         api_key:  $('#v-key').value,   // 留空 = 保留原值
+        tap_strategy: $('#v-strategy').value,
       })
     });
     $('#v-key').value = '';            // 清空输入框，避免明文留在页面上

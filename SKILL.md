@@ -1,6 +1,6 @@
 ---
 name: android-gui-testing
-description: Android 设备黑盒 GUI 功能测试。用户给测试用例（步骤+预期），按本 skill 驱动已连接设备执行并输出带证据的测试报告。内置 uiautomator2 框架、Canvas OCR 读取、点按滚轮控制器、置灰像素断言、知识卡（按前台包名检索 App 操作经验）、PASS/FAIL/BLOCKED/ERROR 结果分类。
+description: Android 设备黑盒 GUI 功能测试。用户给测试用例（步骤+预期），按本 skill 驱动已连接设备执行并输出带证据的测试报告。内置 uiautomator2 框架、Canvas OCR 读取、点按滚轮控制器、置灰像素断言、视觉定位（SoM 网格/归一化坐标双策略）、知识卡（按前台包名检索 App 操作经验）、PASS/FAIL/BLOCKED/ERROR 结果分类。
 ---
 
 # Android 设备 GUI 测试（黑盒）
@@ -109,6 +109,11 @@ t.tap_rid("resource-id") / t.tap_text("文字") / t.tap_desc("content-desc")
                                      # observe=False 用于"触发后立即抓 toast"的动作
 t.tap_text_re(r"正则", clickable=None)  # 文本正则点击（同样轮询定位+执行确认）
 t.tap_xy(x, y, observe=)          # 坐标点击（坐标须从 el_bounds 推导）
+t.tap_vision("目标描述",              # 视觉定位点击（最后手段：view tree + OCR 均无法定位时）
+    bounds=None, crop_dialog=True,      # bounds 限定搜索区域；crop_dialog 自动裁剪弹窗区
+    observe=True, silent=False,         # observe/silent 语义与 tap_el 一致
+    timeout=30.0, verify="")            # verify 非空时点后再截图问视觉模型验证
+                                        # 返回 bool；失败记 WARN 不抛 ERROR
 t.el_bounds(rid/text/desc) -> (x1,y1,x2,y2)  # 元素取 bounds（坐标从元素推导）
 t.wait_rid(rid, timeout=10) / t.wait_text(text, timeout=10)  # 条件等待元素/文字出现
 t.wait_activity(substr, timeout=10) -> str   # 等前台 Activity，超时返回 ""
@@ -297,7 +302,7 @@ python cases/_lib/inventory.py <包名> verify <label> --rids tv_x --texts "按�
 
 ### 视觉模型配置
 入口：Web UI 左侧「视觉模型」页（或设 `DEEPSEEK_API_KEY` 环境变量）。
-配置保存位置/掩码/优先级等细节 → `docs/OPS.md`；密钥只存工作区，不进 skill 包。
+- **tap_strategy**：同页下拉框可选 `auto/som/coordinate`（auto 按模型名启发；som 通用多模态；coordinate 专用 GUI 模型）。配置保存位置/掩码/优先级等细节 → `docs/OPS.md`；密钥只存工作区，不进 skill 包。
 
 ### 系统弹窗/Toast
 - **模态弹窗 ≠ Toast，处理方式完全不同**：弹窗有按钮、不点不散，用 `screen_text()` 判断后

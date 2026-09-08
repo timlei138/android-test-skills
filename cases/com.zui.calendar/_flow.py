@@ -577,3 +577,47 @@ def test_gallery(t, allow):
         t.record("PASS" if denied else "FAIL",
                  f"拒绝后提示需要授予相册权限: {texts[:5]}")
         t.screenshot("图库_拒绝")
+
+
+# ── 弹框滚轮通用工具（178 实战沉淀）───────────────────────────
+def _parse_panel(t):
+    """读弹框 customPanel bounds。"""
+    from test_framework import _parse_nodes
+    for n in _parse_nodes(t._dump()):
+        if n["rid"] == "com.zui.calendar:id/customPanel" and n["bounds_xy"]:
+            return n["bounds_xy"]
+    return None
+
+
+def wheel_tap_steps(t, col_x, n, up=True, panel=None):
+    """弹框滚轮按档位次数点按（不读 OCR 反馈）。
+
+    坑（178 实测踩过）：弹框滚轮是 Canvas 自绘，OCR 在弹框内偶发漏读；
+    滚轮又是循环的，漏读会让脚本以为"没动"继续点 → 在循环上绕圈。
+    故拨值不应让 OCR 反馈参与循环，按确定次数点按更稳。
+
+    约定方向：上=减小、下=增大；每档 ≈ 5 分钟（时长/课间）。
+    panel=(x1,y1,x2,y2)，缺省时现场从当前弹框取。
+    """
+    if panel is None:
+        panel = _parse_panel(t)
+    cy_line = (panel[1] + panel[3]) // 2
+    step_px = int((panel[3] - panel[1]) / 3)
+    for _ in range(n):
+        t.tap_xy(col_x, cy_line - step_px if up else cy_line + step_px, observe=False)
+        time.sleep(0.6)
+
+
+def apply_and_read(t, value_rid):
+    """点弹框「确定」→ 若弹出「是否根据课程时长和休息时长自动调整其他课程？」
+    二次确认框也点「确定」→ 返回 value_rid 的当前文本（如 '5分钟'）。
+    自动跳过场景：若仅需点取消，请直接 t.tap_text('取消', ...) 后自行读取。"""
+    if t.tap_text("确定", wait=4, silent=True):
+        time.sleep(2.5)
+        t.observe_dialogs(rounds=3)
+        if "是否根据课程时长和休息时长自动调整其他课程" in " ".join(t.screen_text()):
+            t.tap_text("确定", wait=3, silent=True)
+            time.sleep(2)
+            t.observe_dialogs(rounds=3)
+    time.sleep(1.0)
+    return (t.read_rid(value_rid) or {}).get("text", "")
