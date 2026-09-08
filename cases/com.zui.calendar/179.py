@@ -7,7 +7,6 @@
   确定 → "是否自动调整其他课程" dialog → 确定 → 设置页 sync
 """
 import os
-import re
 import sys
 import time
 
@@ -31,34 +30,106 @@ from test_framework import TestCase, _parse_nodes   # noqa: E402
 from _flow import goto_课程表空状态, goto_手动创建课程表   # noqa: E402
 
 TIME_SETTINGS_RID = "com.zui.calendar:id/layout_time_settings"
-COL_END_MIN_X = 1297
-COL_END_HOUR_X = 1126
-ROW_Y = 1604
-ROW_STEP = 97
 
 
-def ocr_value_at(t, x, y_lo, y_hi):
-    ocr = t.ocr(y_lo, y_hi)
-    for px, py, c, s in ocr:
-        if re.fullmatch(r"\d{1,2}", s or "") and abs(px - x) < 60:
-            return int(s)
-    return None
+def _cluster_centers(values, tol=25):
+    """把相近的 y 值聚成一行，返回各行中心（抗 OCR 把同一行识别成多个相邻 y）。"""
+    vals = sorted(values)
+    if not vals:
+        return []
+    clusters = [[vals[0]]]
+    for v in vals[1:]:
+        if v - clusters[-1][-1] <= tol:
+            clusters[-1].append(v)
+        else:
+            clusters.append([v])
+    return [sum(c) // len(c) for c in clusters]
 
 
-def tap_increment(t, col_x, target, max_steps=80):
-    """点按该列 tap 下方一格使其 +1，到目标值。"""
+def calibrate_picker(t):
+    """OCR 标定时间滚轮：返回 (row_y, step, cols)，带重试抗瞬时漏读。
+
+    cols 按 x 升序排列，顺序固定为 [start小时, start分钟, end小时, end分钟]。
+    每行 y 经 25px 聚类去除 OCR 重复识别后再算行中心与步距；
+    设备可能为横屏/竖屏，坐标全部动态标定，不写死。
+    """
+    import statistics
+    nums = []
+    for _ in range(3):
+        ocr = t.ocr()
+        nums = [(x, y, c, s) for (x, y, c, s) in ocr if (s or "").lstrip("-").isdigit()]
+        if len(nums) >= 8:
+            break
+        time.sleep(0.8)
+    if not nums:
+        return None, None, []
+    ys = _cluster_centers([y for x, y, c, s in nums], tol=25)
+    cy = int(statistics.median(ys))
+    gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
+    step = int(statistics.median(gaps)) if gaps else 160
+    # 按 x 80px 分带，每带取距纵向中心最近的数值作为当前选中值
+    bands = {}
+    for x, y, c, s in nums:
+        if abs(y - cy) < step * 1.6:
+            bands.setdefault(x // 80, []).append((x, y, s))
+    cols = []
+    for k in sorted(bands):
+        items = bands[k]
+        avg_x = sum(i[0] for i in items) // len(items)
+        cur = min(items, key=lambda v: abs(v[1] - cy))
+        cols.append({"x": avg_x, "y": cur[1], "text": cur[2]})
+    cols.sort(key=lambda c: c["x"])
+    return cy, step, cols
+
+
+def collect_time_ranges(t, max_scrolls=6):
+    """滚动收集 TimeSlotSettings 页所有 tv_time_range 文本（RecyclerView 懒加载）。"""
+    seen = []
+    for _ in range(max_scrolls):
+        for n in _parse_nodes(t._dump()):
+            if n["rid"] == "com.zui.calendar:id/tv_time_range" and n["text"]:
+                if n["text"] not in seen:
+                    seen.append(n["text"])
+        w, h = t.d.window_size()
+        t.d.swipe(w // 2, int(h * 0.82), w // 2, int(h * 0.32), 0.3)  # 上滑露出下方
+        time.sleep(0.8)
+    return seen
+
+
+def scroll_to_top(t):
+    w, h = t.d.window_size()
+    for _ in range(4):
+        t.d.swipe(w // 2, int(h * 0.35), w // 2, int(h * 0.82), 0.3)  # 下滑回顶部
+        time.sleep(0.5)
+
+
+def read_center_val(t, col_x, row_y, step):
+    ocr = t.ocr()
+    best, best_d = None, 1e9
+    for x, y, c, s in ocr:
+        if (s or "").lstrip("-").isdigit():
+            if abs(y - row_y) < step * 0.9 and abs(x - col_x) < 75:
+                d = abs(x - col_x) + abs(y - row_y)
+                if d < best_d:
+                    best_d, best = d, int(s)
+    return best
+
+
+def tap_increment(t, col_x, target, row_y, step, max_steps=120):
+    """在标定后的滚轮列上点按上/下一格，逐步逼近目标值。"""
     for _ in range(max_steps):
-        cur = ocr_value_at(t, col_x, ROW_Y - 60, ROW_Y + 60)
+        cur = read_center_val(t, col_x, row_y, step)
         if cur is None:
-            time.sleep(1.2)
+            time.sleep(1.0)
             continue
         if cur == target:
             return True
+        # 当前中心上方为较小值、下方为较大值 → 下方点按使中心 +1
         if cur < target:
-            t.tap_xy(col_x, ROW_Y + ROW_STEP)
+            t.tap_xy(col_x, row_y + step, observe=False)
         else:
-            t.tap_xy(col_x, ROW_Y - ROW_STEP)
-        time.sleep(0.9)
+            t.tap_xy(col_x, row_y - step, observe=False)
+        time.sleep(0.6)
     return False
 
 
@@ -120,11 +191,18 @@ def run():
     if not open_section_editor(t, 0):
         t.record("FAIL", "未找到上午第1节编辑 arrow")
         return t.finish()
-    ok = tap_increment(t, COL_END_MIN_X, target=53)
+    time.sleep(0.8)
+    row_y, step, cols = calibrate_picker(t)
+    if not cols or len(cols) < 4:
+        t.record("FAIL", f"时间滚轮 OCR 标定失败（cols={cols}）")
+        return t.finish()
+    end_min_col = cols[-1]  # x 最大的列为结束分钟
+    t.record("INFO", f"滚轮标定 row_y={row_y} step={step} end_min_x={end_min_col['x']} start_min_x={cols[1]['x']}")
+    ok = tap_increment(t, end_min_col["x"], target=53, row_y=row_y, step=step)
     if not ok:
         t.record("FAIL", "结束分钟无法拨到 53")
         return t.finish()
-    cur = ocr_value_at(t, COL_END_MIN_X, ROW_Y - 60, ROW_Y + 60)
+    cur = read_center_val(t, end_min_col["x"], row_y, step)
     t.record("PASS" if cur == 53 else "FAIL",
              f"上午第1节结束分钟={cur}（预期 53）")
     if not t.tap_text("确定", wait=3, silent=True):
@@ -140,34 +218,43 @@ def run():
     t.step("Step2 验证上午同步与课时长 50 分钟不变")
     t.observe_dialogs(rounds=3)
     time.sleep(1.0)
-    ranges = []
-    xml = t._dump()
-    for n in _parse_nodes(xml):
-        if n["rid"] == "com.zui.calendar:id/tv_time_range" and n["text"]:
-            ranges.append(n["text"])
+    # 课时长元素在页顶，必须在滚动收集前读取（滚动后会离屏）
     lesson = (t.read_rid("com.zui.calendar:id/tv_lesson_duration") or {}).get("text", "")
     t.record("PASS" if lesson and "50" in lesson else "FAIL",
              f"每节课时长={lesson!r}（预期含 '50'）")
-    # 上午 4 节（范围前 4），第1节 08:00-08:53，后续开始时间顺延 3 分钟
+    ranges = collect_time_ranges(t)
+    # 上午 4 节（前 4 条为上午），第1节 08:00-08:53，后续开始时间顺延 3 分钟
     expected_am = ["08:00-08:53", "09:03-09:53", "10:03-10:53", "11:03-11:53"]
     am_ok = ranges[:4] == expected_am
     t.record("PASS" if am_ok else "FAIL",
              f"上午4节同步: 实测={ranges[:4]}（预期={expected_am}）")
-    # 下午 4 节未变 14:00-14:50 / 15:00-15:50 / 16:00-16:50 / 17:00-17:50
+    # 下午 4 节应未变 14:00-14:50 / 15:00-15:50 / 16:00-16:50 / 17:00-17:50
     expected_pm = ["14:00-14:50", "15:00-15:50", "16:00-16:50", "17:00-17:50"]
-    pm_ok = ranges[4:8] == expected_pm
+    pm_ranges = [r for r in ranges[4:] if r.split("-")[0].split(":")[0] in {"14", "15", "16", "17"}]
+    pm_ok = pm_ranges == expected_pm
     t.record("PASS" if pm_ok else "FAIL",
-             f"下午4节不变: 实测={ranges[4:8]}（预期={expected_pm}）")
+             f"下午4节不变: 实测={pm_ranges}（预期={expected_pm}）")
     t.screenshot("179_改后设置页")
+    # Step3 需要操作上午第4节 arrow，先滚回顶部确保它可见
+    scroll_to_top(t)
+    time.sleep(0.6)
 
     # ── Step3：上午第4节 改结束小时到 14（>下午开始 14:00 → 冲突）──
     t.step("Step3 上午最后小节结束 > 下午开始 → 触发冲突")
     if not open_section_editor(t, 3):                # 第4节（0-based idx=3）
         t.record("FAIL", "未找到上午第4节编辑 arrow")
         return t.finish()
-    # 改结束小时 11 → 14
-    ok = tap_increment(t, COL_END_HOUR_X, target=14)
-    cur_h = ocr_value_at(t, COL_END_HOUR_X, ROW_Y - 60, ROW_Y + 60)
+    time.sleep(1.0)
+    t.observe_dialogs(rounds=3)
+    time.sleep(0.6)
+    row_y3, step3, cols3 = calibrate_picker(t)
+    if not cols3 or len(cols3) < 4:
+        t.record("FAIL", f"时间滚轮 OCR 标定失败（cols={cols3}）")
+        return t.finish()
+    end_hour_col = cols3[-2]  # 倒数第2列为结束小时
+    # 改结束小时 → 14
+    ok = tap_increment(t, end_hour_col["x"], target=14, row_y=row_y3, step=step3)
+    cur_h = read_center_val(t, end_hour_col["x"], row_y3, step3)
     t.record("PASS" if cur_h == 14 else "FAIL",
              f"上午第4节结束小时={cur_h}（预期 14）")
     if not t.tap_text("确定", wait=3, silent=True):

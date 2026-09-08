@@ -70,6 +70,22 @@ def _back(t):
     time.sleep(1.3)
 
 
+def _swipe_up(t):
+    """内容上滚一屏（列表向下翻页）。坐标按当前窗口动态推导，横竖屏通用。"""
+    w, h = t.d.window_size()
+    t.adb_shell("input", "swipe", str(w // 2), str(int(h * 0.8)),
+                str(w // 2), str(int(h * 0.25)), "400")
+    time.sleep(1.2)
+
+
+def _swipe_down(t):
+    """内容下滚一屏（列表向上翻页，用于滚过头后回顶部）。"""
+    w, h = t.d.window_size()
+    t.adb_shell("input", "swipe", str(w // 2), str(int(h * 0.25)),
+                str(w // 2), str(int(h * 0.8)), "400")
+    time.sleep(1.2)
+
+
 def _ocr_numbers(t, tag):
     """弹框数值是 Canvas 自绘，UI 树读不到 —— OCR 补读，只作 INFO 参考。"""
     try:
@@ -137,22 +153,47 @@ def run():
         return t.finish()
 
     # ── Step2: 默认值与设置项展示 ─────────────────────────────────────
+    # 横屏一屏放不下 9 节（上午4+下午5+晚上0）：上午/下午在首屏，
+    # 「晚上课程」组与后续节次在折叠线以下（RecyclerView 懒加载：
+    # off-screen 的 rid 定位得到但 text 为空——首跑实测）。统一滚动收集。
     t.step("Step2 查看课程时间设置页字段默认值")
-    for name, rid, exp in EXPECT:
+    for name, rid, exp in EXPECT[:4]:            # 首屏四项
         info = t.read_rid(rid)
         val = (info or {}).get("text", "")
         t.record("PASS" if val == exp else "FAIL",
                  f"{name}={val!r}（期望 {exp!r}）")
-    # 节次标签「第1节」与时间段「08:00-08:30」是两个独立文本节点，必须分别匹配，
-    # 不能要求同一节点同时含"第"和"-"（那样永远匹配不到，会误报 FAIL）
+    # 节次明细滚动收集：标签「第N节」与时间段是两个独立文本节点，分别匹配去重。
+    # 注意：首屏内容必须在任何滑动之前先采——先滑后采会漏掉第1/第2节和
+    # 「上午课程」组头（二轮验证实测 7/9、缺上午组的根因）
     tx = t.screen_text()
-    labels = [x for x in tx if re.match(r"^第\d+节$", x)]
-    spans = re.findall(r"\d{2}:\d{2}-\d{2}:\d{2}", " ".join(tx))
+    labels = {x for x in tx if re.match(r"^第\d+节$", x)}
+    spans = set(re.findall(r"\d{2}:\d{2}-\d{2}:\d{2}", " ".join(tx)))
+    groups = {g for g in ("上午课程", "下午课程", "晚上课程")
+              if any(g in x and len(x) <= 8 for x in tx)}
+    _swipe_up(t)                                  # 露出「晚上课程」组
+    info = t.read_rid(RID_EVENING)
+    val = (info or {}).get("text", "")
+    t.record("PASS" if val == "0节" else "FAIL",
+             f"晚上课程节数={val!r}（期望 '0节'）")
+    for _ in range(4):
+        tx = t.screen_text()
+        labels |= {x for x in tx if re.match(r"^第\d+节$", x)}
+        spans |= set(re.findall(r"\d{2}:\d{2}-\d{2}:\d{2}", " ".join(tx)))
+        groups |= {g for g in ("上午课程", "下午课程", "晚上课程")
+                   if any(x == g or (g in x and len(x) <= 8) for x in tx)}
+        if len(labels) >= 9 and len(spans) >= 9:
+            break
+        _swipe_up(t)
     ok = len(labels) >= 9 and len(spans) >= 9
     t.record("PASS" if ok else "FAIL",
              f"课程节次明细: {len(labels)} 节课 / {len(spans)} 个时间段，"
-             f"示例={list(zip(labels, spans))[:3]}")
+             f"示例={list(zip(sorted(labels), sorted(spans)))[:3]}")
     t.screenshot("02_字段默认值")
+    # Step2.1/2.2 的时长入口在页面顶部，滚回去（条件等待，防滚过头）
+    for _ in range(5):
+        if t.wait_text("每节课上课时长", timeout=2):
+            break
+        _swipe_down(t)
 
     # ── Step2.1 / 2.2: 两个时长弹框 ───────────────────────────────────
     t.step("Step2.1 打开每节课上课时长弹框")
@@ -162,12 +203,13 @@ def run():
     _open_dialog(t, "课间休息时长（分钟）", "课间休息时长")
 
     # ── Step2.3: 上午/下午/晚上节数入口 ───────────────────────────────
-    # 注：这三个是分组标题（clickable=false），用例只要求"查看"，故断言存在与节数
+    # 这三个是分组标题（clickable=false），用例只要求"查看"，故断言存在与节数；
+    # 分组散布在整页（晚上组在折叠线以下），用 Step2 滚动收集到的 groups 断言
     t.step("Step2.3 查看上午/下午/晚上课程节数入口")
-    tx = t.screen_text()
     for kw in ("上午课程", "下午课程", "晚上课程"):
-        t.record("PASS" if any(kw in x for x in tx) else "FAIL",
-                 f"分组入口'{kw}'存在: {any(kw in x for x in tx)}")
+        ok = kw in groups
+        t.record("PASS" if ok else "FAIL",
+                 f"分组入口'{kw}'存在: {ok}（滚动收集={sorted(groups)}）")
     t.screenshot("03_节数入口")
 
     # ── Step6: 课程提醒时间（入口在确认页，先返回）─────────────────────
@@ -178,8 +220,16 @@ def run():
         return t.finish()
     t.record("INFO", "已从课程时间设置页返回确认页")
 
-    if not t.tap_text("课程提醒时间", wait=4, silent=True):
-        t.record("FAIL", f"未找到'课程提醒时间'入口，屏幕={t.screen_text()[:8]}")
+    # 「课程提醒时间」入口在确认页下部（横屏首屏外），滚动查找再点
+    found = False
+    for _ in range(4):
+        if t.tap_text("课程提醒时间", wait=3, silent=True):
+            found = True
+            break
+        _swipe_up(t)
+    if not found:
+        t.record("FAIL", f"滚动 4 屏仍未找到'课程提醒时间'入口，"
+                         f"屏幕={t.screen_text()[:8]}")
         return t.finish()
     time.sleep(1.6)
     t.observe_dialogs(rounds=3)

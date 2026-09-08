@@ -112,11 +112,15 @@ def run():
     has_cell = bool(t.el_bounds(rid=EMPTY_CELL))
     title_right = t.read_rid("com.zui.calendar:id/toolbar_title") or {}
     name_in_title = "测试课程表" in txt
-    week_in_title = "第1周" in txt
-    ok = "TimetableActivity" in act and name_in_title and week_in_title and has_cell
+    # 周数：读取 tv_date_range（如「第2周」），按当前学期日期动态判定，不写死第几周
+    week_info = (t.read_rid("com.zui.calendar:id/tv_date_range") or {}).get("text", "")
+    week_ok = bool(re.search(r"第\d+周", week_info))
+    t.record("PASS" if week_ok else "FAIL",
+             f"当前周数指示: tv_date_range={week_info!r}（预期匹配 第N周）")
+    ok = "TimetableActivity" in act and name_in_title and week_ok and has_cell
     t.record("PASS" if ok else "FAIL",
              f"进入空课表周视图: activity={act}, 课表名标题={name_in_title}, "
-             f"周数文本={week_in_title}, 空格(cv_empty_content)={has_cell}, "
+             f"周数文本={week_info!r}, 空格(cv_empty_content)={has_cell}, "
              f"toolbar_title={title_right.get('text', '')[:30]!r}")
     t.screenshot("176_周视图")
     if not ok:

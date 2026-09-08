@@ -22,7 +22,7 @@ USER_INPUT = """测试联想日历 170 号用例。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_framework import TestCase
-from _flow import tap_more_menu, top_bar_icons
+from _flow import tap_more_menu, top_bar_icons, 图库导入_选图到确认页
 
 PKG = "com.zui.calendar"
 
@@ -59,7 +59,7 @@ def run():
     # 创建后停在编辑页，BACK 退出到展示页（显示 原课表+周视图）
     for _ in range(3):
         texts = t.screen_text()
-        if any("第1周" in x for x in texts) and any("周一" in x for x in texts):
+        if any(re.search(r"第\d+周", x) for x in texts) and any("周一" in x for x in texts):
             break
         t.adb_shell("input", "keyevent", "KEYCODE_BACK")
         time.sleep(1.2)
@@ -95,80 +95,22 @@ def run():
         return t.finish()
     time.sleep(2)
 
-    # ── Step2: 选图 + 裁剪 + 触发解析 ──────────────────────────────
+    # ── Step2: 选图 + 裁剪 + 触发解析（复用 _flow 共享链路）──────────
+    # 旧内联版 = OCR 找"课表/学生"文字、退化 first_clickable 盲点第一张，
+    # 且不认「图片内容不是课程表」失败弹窗——媒体库一变就是下一个 172
+    # （媒体库是跨用例共享状态，第一张未必是素材）。共享链路含视觉排序、
+    # 裁剪页预检、双态等待与准确归因，勿再内联。
     t.step("Step2 选择固定课程表图片并完成导入流程")
-    # 相册选择器 → OCR 定位课程表图片（按"课程表/学生"文字，全屏找，
-    # 不限 y——缩略图可能在中上部；避免选到测试截图/其它图）
-    thumb = None
-    for _ in range(6):
-        for x, y, c, tx in t.ocr(200, 1900):
-            if "课表" in tx or "学生" in tx:
-                thumb = (x, y)
-                break
-        if thumb:
-            break
-        time.sleep(1)
-    if not thumb:
-        # OCR 没找到文字缩略图：选相册里第一张可点击缩略图（中部区域）
-        thumb = t.first_clickable(500, 1600)
-    if not thumb:
-        t.record("FAIL", "相册选择器未打开或无可选图片")
-        return t.finish()
-    t.record("INFO", f"选中图片: {thumb}")
-    t.tap_xy(*thumb)
-    time.sleep(2)
-    texts = t.screen_text()
-    if any("裁剪" in x for x in texts) or any("完成" in x for x in texts):
-        t.record("PASS", "进入裁剪界面")
-        # 点"完成"确认裁剪（裁剪页右上角；点击后进入解析）
-        confirmed = False
-        for attempt in range(10):
-            if t.tap_text("完成", wait=2, silent=True):
-                time.sleep(2.5)
-                texts = t.screen_text()
-                if any("正在解析" in x for x in texts) or not any("左转" in x for x in texts):
-                    confirmed = True
-                    break
-            time.sleep(1)
-        if not confirmed:
-            t.record("FAIL", "裁剪确认未生效（仍停留裁剪页）")
-            return t.finish()
-    else:
-        t.record("FAIL", f"未进入裁剪界面，屏幕={texts[:6]}")
-        return t.finish()
-
-    # 看门狗持续处理弹窗；轮询等待解析结果（网络错误 或 确认页）。
-    # 知识卡：解析约 20s 且需联网，轮询窗口必须给到 60s——
-    # 原 20×0.75s≈15s 会在「正在解析课程表 90%」中途误判超时（170 曾因此只出 WARN）。
-    parse_ok = None
-    for _ in range(60):
-        time.sleep(1)
-        texts = t.screen_text()
-        if any("无法连接网络" in x for x in texts):
-            parse_ok = False
-            break
-        if any("下一步" in x for x in texts) or any("课程表名称" in x for x in texts):
-            parse_ok = True
-            break
+    parse_ok = 图库导入_选图到确认页(t, timeout=60)
     t.stop_watchdog()
-    if parse_ok is False:
-        t.record("FAIL", "解析未完成：无法连接网络（环境原因：设备无网络）")
-        t.screenshot("01_网络错误")
-        t.blocked("解析需要联网，设备无网络；无法验证新课表创建与原有课表保留")
+    if not parse_ok:
+        # 链路内部已按原因 record/blocked（归因准确），不叠加 FAIL
         return t.finish()
-    if parse_ok is True:
-        t.record("PASS", "解析完成，进入确认流程")
-    else:
-        t.record("WARN", "未等到解析结果，屏幕=" + str(t.screen_text()[:6]))
-        return t.finish()
+    t.record("PASS", "解析完成，进入确认流程")
 
-    # ── Step3: 确认流程 → 验证新课表创建 + 原有课表保留 ─────────────
+    # ── Step3: 确认页「完成」→ 验证新课表创建 + 原有课表保留 ─────────
     t.step("Step3 确认导入并验证新课表创建且原课表未覆盖")
-    # 确认流程：预览页"下一步" → 确认页"完成" → 回到课程表列表
-    if not t.tap_text("下一步", wait=4, silent=True):
-        t.record("FAIL", "未找到预览页'下一步'按钮")
-        return t.finish()
-    time.sleep(2)
+    # 共享链路已走完 预览页「下一步」，当前应停在确认课程表基本信息页
     if not t.tap_text("完成", wait=4, silent=True):
         t.record("FAIL", "未找到确认页'完成'按钮")
         return t.finish()

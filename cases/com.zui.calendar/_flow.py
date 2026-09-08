@@ -10,7 +10,8 @@
 
 已有流程：
   goto_课程表空状态(t)          主页 → 更多 → 课程表（保证为空状态）
-  goto_图库导入_基本信息确认页(t)  完整图库导入链路 → 确认课程表基本信息页
+  goto_图库导入_基本信息确认页(t)  空状态 → 图库导入完整链路 → 确认课程表基本信息页
+  图库导入_选图到确认页(t)      入口之后的共享段：提示弹窗→权限→视觉选图→解析→确认页
   goto_手动创建课程表(t)          课程表空状态 → 手动创建页
   tap_more_menu(t)              点顶栏「更多」并确认菜单弹出
   tap_rightmost_icon(t)         顶栏最右图标坐标（识别结果页禁用）
@@ -206,12 +207,79 @@ def _on_确认页(t):
     return False
 
 
-def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_if_ready=False):
+# ── 图库选图（视觉排序 + 裁剪页预检 + 双态等待）────────────────────────
+# 背景：PhotoPicker 照片 tab 按媒体库时间倒序，所有缩略图共用 icon_thumbnail
+# 这个 rid，盲点"dump 第一张"会选中任何比素材新的图（其他用例拍照/截图都会
+# 插队，媒体库是跨用例共享状态，pm_clear 不清 /sdcard）——172/175 曾因此稳定
+# BLOCKED：选中桌面截图，App 弹「图片内容不是课程表」，而旧 flow 只认成功态
+# 文本，烧满 60s 后错误归因为"超时，需联网"。
+FAIL_DIALOG = "图片内容不是课程表"   # App 通用解析失败弹窗（模态，非 toast）：
+#   选错图会弹、真课表云端解析偶发失败也弹（同素材 2 分钟后可成功，19:27/19:29 实测）
+MAX_PICK_ATTEMPTS = 3                # 解析总次数上限（预检否决不计数）
+
+
+def _visible_thumbs(t):
+    """PhotoPicker 照片网格当前可见缩略图节点（dump 序 = 网格序 = 新→旧）。"""
+    return t.find_nodes(rid_re=r"icon_thumbnail$")
+
+
+def _rank_thumbs(t, thumbs):
+    """视觉排序：逐张裁剪送 vision_ask 判"是否像课程表"。
+
+    只依据通用结构特征（网格/星期表头/课程单元格），不依赖颜色风格——
+    素材可能不止一种课表样式，素材特征写进提示词反而是干扰（讨论定稿）。
+    返回 [(node, verdict), ...] 按可能性降序；视觉不可用时保持网格序兜底。
+    注意：缩略图小（~110px），本排序只决定尝试顺序；权威判定在裁剪页
+    大图预检 + App 失败弹窗。
+    """
+    LEVEL = {"高": 0, "中": 1, "低": 2}
+    ranked = []
+    for n in thumbs[:9]:    # 只排首屏前 9 张，控制视觉调用成本
+        try:
+            ans = t.vision_ask(
+                "这是一张手机图库的缩略图。它是否像一张'课程表'图片？"
+                "只依据通用结构特征判断：表格/网格布局、顶部星期表头、"
+                "单元格含课程名或时间段文字。不依赖颜色风格。"
+                "回答格式：可能性(高/中/低)，加一句理由。",
+                bounds=n["bounds_xy"])
+            ranked.append((n, (ans or "").strip()))
+        except Exception as e:
+            ranked.append((n, f"(视觉不可用:{e})"))
+    ranked.sort(key=lambda it: next(
+        (lv for k, lv in LEVEL.items() if k in it[1]), 3))
+    return ranked
+
+
+def _ensure_grid(t, wait_s=12):
+    """确保停在照片网格：已在网格直接成功；否则 BACK 一次再条件等待。
+
+    （失败弹窗点「知道了」后可能已自动回网格，此时再 BACK 会退出
+    PhotoPicker——所以先查网格，查不到才 BACK。）
+    """
+    for _ in range(3):
+        if t.el_bounds(rid=PHOTO_THUMB):
+            return True
+        _sleep(1.2)
+    t.adb_shell("input", "keyevent", "KEYCODE_BACK")
+    for _ in range(int(wait_s / 1.5)):
+        _sleep(1.5)
+        if t.el_bounds(rid=PHOTO_THUMB):
+            return True
+    return False
+
+
+def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=60, skip_if_ready=False):
     """完整图库导入链路 → 到达「确认课程表基本信息」页。
 
     对应 knowledge/com.zui.calendar.md 的「标准链路/图库导入创建课程表」。
-    步骤：导入入口 → 知道了 → 允许权限 → 照片tab → 选图 → 裁剪完成
-          → 等解析 → 下一步
+    选图策略（2026-09-07 重构，勿回退成"盲点第一张"）：
+      视觉排序候选（只按通用结构特征）→ 逐张：裁剪页大图预检（不是课表
+      不消耗解析轮次）→ 通过才点「完成」触发解析 → 双态等待（成功页 /
+      App「图片内容不是课程表」弹窗 / 弹窗被看门狗点掉后回网格）。
+      预检否决 → 换下一候选；预检通过但解析被拒 → 重试同一张（App 对
+      真课表也会偶发解析失败弹同一弹窗，同素材 2 分钟后可成功——弹窗是
+      通用解析失败框，不是"选错图"专属）。解析总次数上限 MAX_PICK_ATTEMPTS，
+      用尽 BLOCKED（归因"未找到可用课程表"，与网络无关）。
 
     skip_if_ready=True：设备已在确认页时跳过 pm_clear + 导入直接返回 True，
     供失败重跑省前置（1-2 分钟）；前提不满足自动回落完整导入。
@@ -233,6 +301,19 @@ def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_i
         t.blocked("未找到'从图库导入课程表'按钮")
         return False
     _sleep(2)
+    return 图库导入_选图到确认页(t, timeout=timeout)
+
+
+def 图库导入_选图到确认页(t, timeout=60):
+    """共享链路（170/172/175 共用）：提示弹窗 → 照片权限 → PhotoPicker
+    视觉选图 → 裁剪预检 → 解析双态等待 → 「下一步」→ 确认课程表基本信息页。
+
+    调用方需已点中导入入口（空状态按钮 btnImportFromGallery 或已有课表
+    展示页菜单「图库导入课程表」均可），看门狗策略由调用方决定——本函数
+    自带 0.5s 级双态轮询，不依赖看门狗也能接住失败弹窗。
+    失败时本函数已按原因 record/blocked（归因准确），调用方直接 return
+    即可，不要再叠加 FAIL（否则环境类 BLOCKED 会被升级成 FAIL）。
+    """
     # 用本模块的 _dismiss_image_hint 而非裸 tap_text：它轮询等框出现，且能识别
     # "已被看门狗关掉 / 直接进了 PhotoPicker"从而跳过。裸 tap_text 在看门狗抢先
     # 关框时找不到'知道了'，会白白记一条 WARN（175 探查时实测踩到）。
@@ -243,28 +324,110 @@ def goto_图库导入_基本信息确认页(t, pm_clear=True, timeout=40, skip_i
 
     _tap_if_present(t, "照片", wait=6)      # PhotoPicker 切到照片 tab
     _sleep(3)
-    # PhotoPicker 首次冷启动渲染较慢，tab 切换可能落空（175 第二次跑实测 BLOCKED）。
-    # 没看到缩略图就再切一次 tab，再等一轮，避免把时序问题记成环境 BLOCKED。
-    if not t.el_bounds(rid=PHOTO_THUMB):
+    thumbs = _visible_thumbs(t)
+    if not thumbs:
+        # PhotoPicker 首次冷启动渲染较慢，tab 切换可能落空（175 实测）。
         _tap_if_present(t, "照片", wait=5)
         _sleep(3)
-    if not _tap_rid_raw(t, PHOTO_THUMB):
+        thumbs = _visible_thumbs(t)
+    if not thumbs:
         t.blocked("PhotoPicker 无可选图片（缺素材或未被 MediaStore 收录）")
         return False
-    _sleep(5)
 
-    if not _tap_rid_raw(t, CROP_DONE):   # 裁剪页 → 完成
-        t.blocked("未进入裁剪页")
+    ranked = _rank_thumbs(t, thumbs)
+    t.record("INFO", "图库缩略图视觉排序（高→低）: "
+             + " | ".join(f"候选{i+1}:{v[:36]}"
+                          for i, (_, v) in enumerate(ranked)))
+
+    parse_ok = False
+    parse_tries = 0
+    ci = 0                 # 候选下标：预检否决才前进；预检通过但解析被拒 → 重试同一张
+    while ci < len(ranked) and parse_tries < MAX_PICK_ATTEMPTS:
+        node, _verdict = ranked[ci]
+        b = node["bounds_xy"]
+        t.adb_shell("input", "tap",
+                    str((b[0] + b[2]) // 2), str((b[1] + b[3]) // 2))
+        got_crop = False
+        for _ in range(10):              # 条件等待裁剪页（替代固定 sleep）
+            _sleep(1)
+            if t.el_bounds(rid=CROP_DONE):
+                got_crop = True
+                break
+        if not got_crop:
+            t.blocked(f"点击候选{ci+1}缩略图后未进入裁剪页")
+            return False
+
+        # 裁剪页预检（便宜闸门）：大图判定，不是课表就不消耗解析轮次，
+        # 也绕开「知道了」之后落点不确定的回头路
+        try:
+            crop_ans = t.vision_ask(
+                "这是裁剪页，中间是被选中的大图。它是否是一张课程表？"
+                "只依据结构特征（网格、星期表头、课程单元格）判断，"
+                "不依赖颜色风格。回答以 是 或 否 开头。")
+        except Exception as e:
+            crop_ans = f"是（视觉不可用放行:{e}）"   # 视觉挂了不卡死链路
+        t.screenshot(f"候选{ci+1}_裁剪页预检")
+        # 判定用否定词匹配，不能用 startswith("否")：模型回答不保证"是/否"
+        # 开头，"不是课程表，这是桌面截图" 这类回答会漏判（19:27 验证实测）
+        if re.search(r"不是|并非", crop_ans) or (crop_ans or "").startswith(("否", "不")):
+            t.record("INFO",
+                     f"候选{ci+1} 预检非课程表: {crop_ans[:60]} → 换下一张")
+            if not _ensure_grid(t):
+                t.blocked("裁剪页返回后未回到照片网格")
+                return False
+            ci += 1
+            continue
+
+        if not _tap_rid_raw(t, CROP_DONE):   # 预检通过 → 触发解析
+            t.blocked("未进入裁剪页")
+            return False
+        parse_tries += 1
+
+        # 双态等待（时间 deadline，dump 本身 ~1s/轮即天然限速）：
+        #   成功页「确认识别结果」 / App 失败弹窗「图片内容不是课程表」 /
+        #   弹窗被看门狗抢先点掉后回到网格（三等价失败信号，抗竞争）
+        state = None
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            txt = " ".join(t.screen_text())
+            if "确认识别结果" in txt:
+                state = "ok"
+                break
+            if FAIL_DIALOG in txt:
+                state = "rejected"
+                break
+            if t.el_bounds(rid=PHOTO_THUMB):
+                state = "rejected"
+                break
+        if state == "ok":
+            parse_ok = True
+            break
+        if state == "rejected":
+            t.screenshot(f"候选{ci+1}_被判定非课程表")
+            t.record("INFO",
+                     f"候选{ci+1} 触发「{FAIL_DIALOG}」弹窗"
+                     f"（第{parse_tries}/{MAX_PICK_ATTEMPTS}次解析）")
+            # 必须先点「知道了」关弹窗：弹窗不关，BACK 只关弹层回不到网格
+            #（19:27 验证实测 BLOCKED）。弹窗可能已被看门狗点掉，落空属预期
+            t.tap_text("知道了", wait=2, silent=True)
+            if not _ensure_grid(t):
+                t.blocked("失败弹窗处理后未回到照片网格")
+                return False
+            # 走到这里说明预检已认定是课表 → App 拒绝多为云端解析偶发失败
+            #（同素材 2 分钟后解析成功的实测），重试同一张不换候选
+            if parse_tries < MAX_PICK_ATTEMPTS:
+                t.record("INFO", "预检已判定为课程表 → 重试同一张（解析偶发失败）")
+            continue
+        t.record("INFO", f"候选{ci+1} 解析 {timeout}s 无成功/失败信号")
+        if _ensure_grid(t):
+            continue
+        t.blocked(f"图片解析未完成（{timeout}s 无响应且无法返回照片网格，需联网）")
         return False
 
-    ok = False
-    for _ in range(timeout):
-        _sleep(1)
-        if "确认识别结果" in " ".join(t.screen_text()):
-            ok = True
-            break
-    if not ok:
-        t.blocked(f"图片解析未完成（超时 {timeout}s，需联网）")
+    if not parse_ok:
+        t.blocked(f"图库未找到可用课程表：非课程表候选已被预检剔除；"
+                  f"课程表候选解析 {parse_tries} 次均被 App 拒绝"
+                  f"（「{FAIL_DIALOG}」，含云端解析偶发失败可能）")
         return False
     t.screenshot("确认识别结果")
     _sleep(1)
