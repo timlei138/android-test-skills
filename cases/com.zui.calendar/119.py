@@ -22,8 +22,9 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)  # 同目录（本 App 共享模块）
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(_HERE)), "framework"))
 from test_framework import TestCase
 
 PKG = "com.zui.calendar"
@@ -284,7 +285,7 @@ def run():
             restore_via_ui(t)
         # 旋屏约定：不还原自动旋转，保持竖屏锁定（套件基线）
 
-    t.finish()
+    return t.finish()
 
 
 if __name__ == "__main__":

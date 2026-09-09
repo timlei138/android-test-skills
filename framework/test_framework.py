@@ -51,9 +51,25 @@ DIALOG_ALLOW_WORDS = ("允许", "同意", "始终允许", "仅在使用中允许
                       "仅在使用时允许", "仅本次使用时允许", "全部允许", "选择照片")
 DIALOG_DENY_WORDS = ("拒绝并不再询问", "拒绝", "不允许", "禁止")
 
-# AI 学习词表持久化文件：AI 处理过的未知弹窗按钮自动并入，下次走快路径
-LEARNED_WORDS_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "dialog_words.json")
+# AI 学习词表持久化文件：AI 处理过的未知弹窗按钮自动并入，下次走快路径。
+# 放工作区 storage/（运行产物）而非 framework/：framework/ 受变更管控，
+# AI 学词会静默改写它，且多副本各自漂移（sync 互相覆盖）。
+LEARNED_WORDS_FILE = os.path.join(STORAGE_DIR, "dialog_words.json")
+
+
+def _migrate_learned_words():
+    """旧版本把学习词表放在 framework/（skill 包）内，现迁到工作区 storage/。
+    新文件尚不存在且有旧文件时，把旧词表搬过去（幂等，失败静默）。"""
+    legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "dialog_words.json")
+    if os.path.isfile(LEARNED_WORDS_FILE) or not os.path.isfile(legacy):
+        return
+    try:
+        import shutil
+        os.makedirs(os.path.dirname(LEARNED_WORDS_FILE), exist_ok=True)
+        shutil.copyfile(legacy, LEARNED_WORDS_FILE)
+    except OSError:
+        pass
 
 
 def _dump_call_src():
@@ -281,7 +297,8 @@ def _resolve_serial(device_id=None):
     """
     if device_id:
         return device_id
-    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    out = subprocess.run(["adb", "devices"], capture_output=True, text=True,
+                         timeout=10).stdout
     devs = [l.split()[0] for l in out.splitlines()[1:]
             if len(l.split()) >= 2 and l.split()[1] == "device"]
     if not devs:
@@ -313,10 +330,8 @@ class TestCase:
         # 设备绑定：整个用例生命周期内所有 adb/u2 操作锁定同一 serial
         self.serial = _resolve_serial(device_id)
         # 唤醒屏幕并解锁
-        subprocess.run(self._adb("shell", "input", "keyevent", "KEYCODE_WAKEUP"),
-                       capture_output=True)
-        subprocess.run(self._adb("shell", "wm", "dismiss-keyguard"),
-                       capture_output=True)
+        self._adb_run("shell", "input", "keyevent", "KEYCODE_WAKEUP", timeout=10)
+        self._adb_run("shell", "wm", "dismiss-keyguard", timeout=10)
         # 防锁屏保活（根因防护）：USB 供电期间保持屏幕常亮，
         # 避免长用例执行中设备因休眠超时被锁屏，导致后续 adb/u2 交互打到
         # keyguard、dump 读不到 App 节点、元素定位失败 → 用例莫名 FAIL/BLOCKED。
@@ -415,6 +430,14 @@ class TestCase:
         """构造绑定本用例 serial 的 adb 命令列表。"""
         return ["adb", "-s", self.serial, *args]
 
+    def _adb_run(self, *args, timeout=30.0, text=True):
+        """带超时的 adb 执行原语（绑定本用例 serial）。
+        设备掉线/adb server 卡死时在 timeout 秒后抛 subprocess.TimeoutExpired，
+        由上层异常兜底产出 ERROR 报告，而不是无限挂起。
+        text=False 用于需要原始字节的场景（screencap）。返回 CompletedProcess。"""
+        return subprocess.run(self._adb(*args), capture_output=True, text=text,
+                              timeout=timeout)
+
     # ── 防锁屏保活（跑用例期间屏幕必须保持点亮）──────────────────────
     # 失败根因：长用例执行过程中设备因休眠超时被锁屏，后续 adb/u2 交互打到
     # keyguard，dump 读不到 App 节点 → 元素定位失败 → 用例莫名其妙 FAIL/BLOCKED。
@@ -487,15 +510,13 @@ class TestCase:
     def _probe_device_info(self):
         """采集设备身份信息：serial + 型号 + Android 版本 + 屏幕尺寸。"""
         def _gp(k):
-            r = subprocess.run(self._adb("shell", "getprop", k),
-                               capture_output=True, text=True)
+            r = self._adb_run("shell", "getprop", k, timeout=15)
             return r.stdout.strip()
         try:
             model = _gp("ro.product.model") or "未知型号"
             ver = _gp("ro.build.version.release") or "?"
             size = ""
-            r = subprocess.run(self._adb("shell", "wm", "size"),
-                               capture_output=True, text=True)
+            r = self._adb_run("shell", "wm", "size", timeout=15)
             m = re.search(r"(\d+x\d+)", r.stdout)
             if m:
                 size = f"，{m.group(1)}"
@@ -557,6 +578,7 @@ class TestCase:
     # ── 弹窗自动点击（u2 原生 watcher，主流程驱动，零额外 dump）──────
     def _load_learned_words(self):
         """读取 AI 学习词表（AI 处理过的未知弹窗按钮），返回 {category: [words]}"""
+        _migrate_learned_words()  # 旧 framework/ 位置迁到工作区（幂等）
         try:
             import json
             with open(LEARNED_WORDS_FILE, encoding="utf-8") as f:
@@ -575,6 +597,7 @@ class TestCase:
         learned.setdefault(category, []).append(word)
         try:
             import json
+            os.makedirs(os.path.dirname(LEARNED_WORDS_FILE), exist_ok=True)
             with open(LEARNED_WORDS_FILE, "w", encoding="utf-8") as f:
                 json.dump(learned, f, ensure_ascii=False, indent=2)
             print(f"🧠 [AI弹窗] 已学习按钮 {word!r} → {category} 词表")
@@ -671,9 +694,14 @@ class TestCase:
         except Exception as e:
             print(f"🤖 [AI弹窗] 识别失败: {e}")
             return
-        if not res.get("is_dialog"):
+        # 模型输出不可信时（非 dict / 置信度非数值）一律跳过，不抛异常——
+        # AI 兜底是增强通道，一次异常输出不能让用例崩成 ERROR。
+        if not isinstance(res, dict) or not res.get("is_dialog"):
             return
-        conf = float(res.get("confidence") or 0)
+        try:
+            conf = float(res.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
         action = str(res.get("action") or "skip")
         btn = str(res.get("button_to_click") or "").strip()
         title = str(res.get("title") or "?")
@@ -694,10 +722,10 @@ class TestCase:
         # 执行点击：优先按按钮文字点，失败则记录
         try:
             # disabled 按钮点击无效，跳过并提示（如分享选择器里未选目标时的"仅此一次"）
-            import io as _io
             xml_now = self._dump()
-            m = re.search(rf'<node[^>]*text="{re.escape(btn)}"[^>]*enabled="(true|false)"', xml_now)
-            if m and m.group(1) == "false":
+            disabled = any(n["text"] == btn and n["enabled"] == "false"
+                           for n in _parse_nodes(xml_now))
+            if disabled:
                 print(f"🤖 [AI弹窗] 按钮 {btn!r} 当前 disabled，跳过（{title}）")
                 return
             if self.d(text=btn).click_exists(timeout=0.6):
@@ -812,7 +840,7 @@ class TestCase:
             except Exception as e:
                 print(f"⚠️ [db] 断言结果入库失败: {e}")
         mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
-                "BLOCKED": "⛔"}[result]
+                "BLOCKED": "⛔"}.get(result, "❓")
         print(f"   {mark} {entry['detail']}")
         if entry.get("state"):
             print(f"   📊 状态 {entry['state']}")
@@ -1263,8 +1291,7 @@ class TestCase:
     # ── 系统级操作（通用前置条件）────────────────────────────────
     def adb_shell(self, *args):
         """执行 adb shell 命令（已绑定本用例 serial），返回 stdout"""
-        r = subprocess.run(self._adb("shell", *args),
-                           capture_output=True, text=True)
+        r = self._adb_run("shell", *args, timeout=30)
         return r.stdout.strip()
 
     def pm_clear(self, package, confirm=False):
@@ -1351,10 +1378,8 @@ class TestCase:
 
     def current_activity(self):
         """当前前台完整 Activity（如 com.example.app/.ui.MainActivity）"""
-        out = subprocess.run(
-            self._adb("shell", "dumpsys", "activity", "activities"),
-            capture_output=True, text=True,
-        ).stdout
+        out = self._adb_run("shell", "dumpsys", "activity", "activities",
+                            timeout=15).stdout
         m = re.search(r"topResumedActivity=ActivityRecord\{\S* u0 ([\w./]+) ", out)
         if not m:
             m = re.search(r"ResumedActivity: ActivityRecord\{\S* u0 ([\w./]+) ", out)
@@ -1439,8 +1464,8 @@ class TestCase:
         print("🛡️  弹窗自动点击已停用")
 
     def current_package(self):
-        out = subprocess.run(self._adb("shell", "dumpsys", "activity", "activities"),
-                             capture_output=True, text=True).stdout
+        out = self._adb_run("shell", "dumpsys", "activity", "activities",
+                            timeout=15).stdout
         m = re.search(r"topResumedActivity=ActivityRecord\{\S* u0 ([\w.]+)/", out)
         return m.group(1) if m else "unknown"
 
@@ -1474,8 +1499,8 @@ class TestCase:
     def _region_contrast(self, bounds, scale=3):
         """计算按钮区域内文字与背景的对比度（0-255 差值）"""
         x1, y1, x2, y2 = bounds
-        raw = subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                             capture_output=True).stdout
+        raw = self._adb_run("exec-out", "screencap", "-p", timeout=15,
+                            text=False).stdout
         from PIL import Image
         img = Image.open(io.BytesIO(raw)).convert("L")
         crop = img.crop((x1, y1, x2, y2))
@@ -1515,8 +1540,8 @@ class TestCase:
         """当前屏幕 PNG 字节（绑定本用例 serial）。截屏统一入口，
         供 _auto_screenshot / ocr / vision 复用，避免各自裸拼 adb。"""
         self.ensure_awake()   # 截屏前保活，避免截到锁屏界面
-        return subprocess.run(self._adb("exec-out", "screencap", "-p"),
-                              capture_output=True).stdout
+        return self._adb_run("exec-out", "screencap", "-p", timeout=15,
+                             text=False).stdout
 
     def _log_action(self, action, detail=None, start=None):
         """记录一步 UI 操作及耗时。start 为操作开始前 time.time()。"""
@@ -1832,7 +1857,7 @@ class TestCase:
             lines.append(f"\n## {s['name']}")
             for r in s["results"]:
                 mark = {"PASS": "✅", "FAIL": "❌", "WARN": "⚠️", "INFO": "ℹ️",
-                        "BLOCKED": "⛔"}[r["result"]]
+                        "BLOCKED": "⛔"}.get(r["result"], "❓")
                 lines.append(f"- {mark} {r['detail']}")
                 if r.get("state"):
                     lines.append(f"  - 状态: {r['state']}")

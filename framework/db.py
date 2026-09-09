@@ -206,7 +206,12 @@ class RecordDB:
             parent = os.path.dirname(os.path.abspath(self.path))
             if not os.path.isdir(parent):
                 os.makedirs(parent, exist_ok=True)
-            self._local.conn = sqlite3.connect(self.path, check_same_thread=False)
+            # timeout=10：并发写（Web UI + run_case 同时写库）锁冲突时最多等
+            # 10s 再抛 database is locked，而不是立即失败丢记录。
+            # WAL：写前日志，读写并发能力更好（读不阻塞写）。
+            self._local.conn = sqlite3.connect(self.path, check_same_thread=False,
+                                               timeout=10)
+            self._local.conn.execute("PRAGMA journal_mode=WAL")
             self._local.conn.executescript(_SCHEMA)
             # 幂等迁移：旧库补列（列已存在时 ALTER 抛错，忽略即可）
             for stmt in _MIGRATIONS:
@@ -218,6 +223,9 @@ class RecordDB:
         return self._local.conn
 
     def close(self):
+        """关闭当前线程的连接。
+        ⚠️ threading.local 每个线程各持一个连接，本方法只关当前线程的；
+        其它线程的连接随各自线程退出由 GC 回收（无显式 close 时机）。"""
         with self._lock:
             if hasattr(self._local, 'conn') and self._local.conn is not None:
                 self._local.conn.close()

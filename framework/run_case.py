@@ -251,16 +251,28 @@ def main():
         from test_framework import CaseAbort
         is_abort = isinstance(e, CaseAbort)
         tc = _last_case()
+        # 收尾异常判定：finish() 已跑过 = 用例本体已完成并产出 verdict，
+        # 后续收尾代码（finally 恢复、finish 后的清理）再抛异常，不该把结论
+        # 压成 ERROR——否则报告/DB 显示 PASS、退出码却是 3，追溯链两端打架。
+        # 此时退出码沿用 final_status 映射（测试本体已完成，收尾异常不算失败）。
+        already_finished = bool(tc is not None and getattr(tc, "_finished", False))
         if tc is not None:
             try:
-                if not is_abort:
+                if not is_abort and not already_finished:
                     tc._fatal_error = e
                 tc.finish()
             except Exception:
                 pass
-        code = 1 if is_abort else 3
-        print(f"\n💥 用例异常终止（{'必需操作失败' if code == 1 else '执行异常'}），"
-              f"退出码 {code}")
+        if is_abort:
+            code = 1
+            tail = "必需操作失败"
+        elif already_finished:
+            code = exit_code_for(getattr(tc, "final_status", None))
+            tail = f"收尾异常（用例已完成，结论 {getattr(tc, 'final_status', None)}）"
+        else:
+            code = 3
+            tail = "执行异常"
+        print(f"\n💥 用例异常终止（{tail}），退出码 {code}")
         sys.exit(code)
 
     status = getattr(_last_case(), "final_status", None)

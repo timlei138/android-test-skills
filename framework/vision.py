@@ -99,19 +99,20 @@ def _is_cert_verify_error(e) -> bool:
 
 
 def urlopen_with_ssl_fallback(req, timeout):
-    """默认严格校验证书；CERTIFICATE_VERIFY_FAILED 时自动降级重试一次
-    （跳过校验——典型场景：企业代理 SSL 拦截重签证书）。
-    返回 (response, ssl_skipped)。设环境变量 DSH_SSL_VERIFY=1 可禁止降级。"""
+    """默认严格校验证书，失败即抛异常；仅当显式设置 DSH_SSL_INSECURE=1 时
+    （企业代理 SSL 拦截、自签证书等场景）才跳过校验重试一次。
+    返回 (response, ssl_skipped)。安全默认值：默认不降级，凭据与截图不裸奔。"""
     try:
         return urllib.request.urlopen(req, timeout=timeout), False
     except urllib.error.URLError as e:
-        if not _is_cert_verify_error(e) or os.environ.get("DSH_SSL_VERIFY") == "1":
+        if not _is_cert_verify_error(e) \
+                or os.environ.get("DSH_SSL_INSECURE") != "1":
             raise
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-        print("⚠️ [vision] SSL 证书校验失败，已跳过校验重试"
-              "（疑似企业代理拦截；设 DSH_SSL_VERIFY=1 可禁用此降级）")
+        print("⚠️ [vision] SSL 证书校验失败，已按 DSH_SSL_INSECURE=1 跳过校验重试"
+              "（疑似企业代理拦截；不设该变量时默认严格校验）")
         return urllib.request.urlopen(req, timeout=timeout, context=ctx), True
 
 

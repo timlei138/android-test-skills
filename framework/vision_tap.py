@@ -12,7 +12,7 @@ Canvas、自定义滚轮、色盘、无文字图标、WebView 私有控件。
 - coordinate  专用 GUI/grounding 模型：模型直接输出 0-1000 归一化坐标，
               device_x = x / 1000 * img_w / scale + offset_x（允许压缩）。
 
-坐标换算不变式（docs/VISION_TAP_PLAN.md §3.6）：
+坐标换算不变式：
 - SoM 路径不压缩（scale=1.0）：网格画在送模前最后一张图上；margin 仅用于
   绘图（外扩画布放标签），不参与坐标换算。
 - 归一化坐标路径输出的是比例而非像素，允许 resize_for_vision 压缩。
@@ -233,22 +233,31 @@ def _coordinate_tap(vision, screen_image, description, timeout=None):
 
 
 def _parse_normalized(data):
-    """从模型响应提取 0-1000 归一化 (x, y)；失败返回 None。
+    """从模型响应提取 0-1000 归一化 (x, y)；失败或越界返回 None。
 
     兼容 Open-AutoGLM 动作语法：模型把 do(action="Tap", element=[512,384])
     塞进任意字段值时，用正则提取 element（模型输出不保证是合法 Python，
-    不用 ast.literal_eval）。
+    不用 ast.literal_eval）。越界（<0 或 >1000）视作解析失败，与 SoM 路径
+    的越界引用返回 None 对齐，避免静默点到屏外。
     """
+    def _in_range(x, y):
+        try:
+            return 0 <= int(x) <= 1000 and 0 <= int(y) <= 1000
+        except (TypeError, ValueError):
+            return False
+
     if isinstance(data, dict):
         try:
-            return int(data["x"]), int(data["y"])
+            x, y = int(data["x"]), int(data["y"])
+            if _in_range(x, y):
+                return x, y
         except (KeyError, TypeError, ValueError):
             pass
         for v in data.values():
             if isinstance(v, str) and "element" in v:
                 m = re.search(r"do\s*\(\s*action\s*=\s*['\"]Tap['\"]\s*,\s*"
                               r"element\s*=\s*\[*(\d+)\s*,\s*(\d+)\]*\s*\)", v)
-                if m:
+                if m and _in_range(m.group(1), m.group(2)):
                     return int(m.group(1)), int(m.group(2))
     return None
 

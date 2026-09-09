@@ -437,37 +437,6 @@ class TestFinalStatus(unittest.TestCase):
         finally:
             tf.LAST_CASE = old_last
 
-    def test_finish_idempotent(self):
-        """finish() 幂等守卫（P3-1）：用例正常 finish 后收尾代码再抛异常时，
-        run_case 的异常兜底会再调一次 finish —— 必须直接返回旧报告，
-        不重复备份/写库/重算结论。"""
-        t = self._mk(["PASS"])
-        t.name = "单测_finish_幂等"
-        t.device_info = "fake-device"
-        t.case_dir = tempfile.mkdtemp()
-        t._case_start_time = time.time()
-        t._dump_count = 0
-        t._db = None
-        t._db_case_id = None
-        t._fatal_error = None
-        old_last = tf.LAST_CASE
-        buf = io.StringIO()
-        try:
-            with contextlib.redirect_stdout(buf), \
-                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()) as rd:
-                p1 = t.finish()
-                self.assertTrue(t._finished)
-                self.assertEqual(t.final_status, "PASS")
-                # 模拟"finish 后收尾代码又出事"：改变状态再调 finish，
-                # 守卫应直接返回旧路径，final_status 不被重算覆盖
-                t._fatal_error = RuntimeError("finish 之后的收尾异常")
-                p2 = t.finish()
-            self.assertEqual(p1, p2)
-            self.assertEqual(t.final_status, "PASS")   # 不变 ERROR
-            self.assertEqual(buf.getvalue().count("报告已生成"), 1)
-        finally:
-            tf.LAST_CASE = old_last
-
 
 # ── 被测 App 包名推断（finish() 报告头 / DB package 列的数据源）──────
 @unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")

@@ -2,7 +2,7 @@
 """视觉定位（screenshot / vision_provider / vision_tap / tap_vision）单测。
 
 纯逻辑测试：不连设备、不调真实视觉 API（Fake 注入固定响应）。
-覆盖 docs/VISION_TAP_PLAN.md §6 P0 单测清单：
+覆盖视觉定位坐标换算的 P0 单测清单：
 - SoM 换算：格子引用 → 设备绝对坐标（margin 不参与公式）
 - crop → resize 链：offset / scale 累乘正确（coordinate 策略与 OCR 用）
 - resolve_strategy：显式 / 非法回退 / auto 启发 / 无模型名回落 som

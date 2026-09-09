@@ -2,7 +2,7 @@
 """公共截图管线：采集、裁剪、压缩、编码（几何信息显式化）。
 
 所有视觉 / OCR 操作的图像处理公共层：不依赖任何视觉模型，只处理图像。
-坐标换算契约（docs/VISION_TAP_PLAN.md §3.6）——ScreenImage 的 image 像素
+坐标换算契约——ScreenImage 的 image 像素
 坐标 P 与设备屏幕坐标 D 满足：
 
     P = (D - offset) * scale
