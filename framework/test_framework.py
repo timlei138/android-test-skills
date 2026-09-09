@@ -124,9 +124,148 @@ def _parse_nodes(xml):
     return out
 
 
+def _match_node(nodes, spec):
+    """按 locate() 组合属性匹配节点（全部条件 AND，任一不满足即跳过）。
+
+    组合定位的稳定性来源：单个属性（如 desc="日历"）可能命中图标/widget/菜单
+    等多处，叠加 cls / clickable 等语义属性后收缩到唯一目标。只允许语义属性
+    组合（rid/desc/text/cls/clickable/contains），禁止 bounds/位置索引——
+    布局一改就全崩，且属性变化不携带任何业务含义（见 docs/case-writing.md「定位规范与旋屏约定」节）。
+    """
+    for n in nodes:
+        if spec.get("rid") and n["rid"] != spec["rid"]:
+            continue
+        if spec.get("desc") and n["desc"] != spec["desc"]:
+            continue
+        if spec.get("text") and n["text"] != spec["text"]:
+            continue
+        if spec.get("cls") and n["cls"] != spec["cls"]:
+            continue
+        if spec.get("clickable") is not None \
+                and (n["clickable"] == "true") != bool(spec["clickable"]):
+            continue
+        if spec.get("contains") \
+                and spec["contains"] not in (n["text"] + n["desc"]):
+            continue
+        if not n["bounds_xy"]:          # 无坐标的节点（不可见/离屏）不可操作
+            continue
+        return n
+    return None
+
+
 class CaseAbort(Exception):
     """必需操作失败（require_* 系列），用例应立即中止。
     run_case.py 捕获后仍会生成报告，退出码按 FAIL（1）处理。"""
+
+
+class _Located:
+    """locate() 的返回值：组合属性定位结果的轻量包装。
+
+    与 tap_* 同一契约：click/long_click 轮询定位（wait 秒内）→ 操作 →
+    observe 检查链；找不到不抛异常，默认记 WARN（silent=True 跳过）。
+    观察性读取用 exists / bounds / center / node 属性（exists 每次读
+    都会重新 dump，是实时视图不是缓存快照）。
+    """
+
+    def __init__(self, tc, spec):
+        self._tc = tc
+        self._spec = spec
+        self._desc = " AND ".join(f"{k}={v!r}" for k, v in spec.items())
+        self._node = None
+
+    def _find(self, timeout=0.0):
+        """轮询查找目标节点；命中返回节点 dict，超时返回 None。
+        每次轮询的 dump 都顺带驱动弹窗看门狗（与 wait_* 行为一致）。"""
+        deadline = time.time() + timeout
+        while True:
+            xml = self._tc._dump()
+            self._tc._run_dialog_watchers(xml)
+            n = _match_node(_parse_nodes(xml), self._spec)
+            if n:
+                self._node = n
+                return n
+            if time.time() >= deadline:
+                self._node = None
+                return None
+            time.sleep(0.5)
+
+    def __repr__(self):
+        return f"<_Located {self._desc} hit={self._node is not None}>"
+
+    @property
+    def exists(self):
+        """目标当前是否可见可操作（每次访问都重新 dump，实时判定）。"""
+        return self._find(0.0) is not None
+
+    @property
+    def bounds(self):
+        """命中的 bounds (x1,y1,x2,y2)；未命中 None。"""
+        return self._node["bounds_xy"] if self._node else None
+
+    @property
+    def center(self):
+        """命中元素中心 (x, y)；未命中 None。"""
+        b = self.bounds
+        return ((b[0] + b[2]) // 2, (b[1] + b[3]) // 2) if b else None
+
+    @property
+    def node(self):
+        """命中的完整属性 dict（text/desc/rid/cls/clickable/bounds_xy...）。"""
+        return dict(self._node) if self._node else None
+
+    @property
+    def text(self):
+        """命中的 text（通常与 spec 的 text 相同，主要为 contains 定位服务）。"""
+        return self._node["text"] if self._node else None
+
+    def wait(self, timeout=8.0):
+        """轮询等待目标出现。出现返回 True。"""
+        return self._find(timeout) is not None
+
+    def click(self, wait=5.0, observe=True, silent=False):
+        """点击目标。返回 bool（与 tap_* 统一契约）。"""
+        n = self._find(wait)
+        if not n:
+            if not silent:
+                self._tc.record("WARN", f"locate 点击未找到: {self._desc}")
+            return False
+        b = n["bounds_xy"]
+        t0 = time.time()
+        self._tc.d.click((b[0] + b[2]) // 2, (b[1] + b[3]) // 2)
+        if not observe:
+            self._tc._log_action("tap", f"locate[{self._desc}] observe=False", t0)
+            return True
+        time.sleep(ACTION_DELAY)
+        self._tc._check_dialogs_after_action()
+        self._tc._log_action("tap", f"locate[{self._desc}]", t0)
+        self._tc._auto_screenshot(f"点击_locate")
+        return True
+
+    def long_click(self, wait=5.0, duration=1.0, observe=True, silent=False):
+        """长按目标（launcher 长按菜单等）。返回 bool。
+        ⚠️ 用 ATX 坐标长按（long_press_xy），input swipe 模拟长按在
+        launcher 上经常弹不出菜单（实测，见 knowledge/_system.md）。"""
+        n = self._find(wait)
+        if not n:
+            if not silent:
+                self._tc.record("WARN", f"locate 长按未找到: {self._desc}")
+            return False
+        b = n["bounds_xy"]
+        t0 = time.time()
+        cx, cy = (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
+        ok = self._tc.long_press_xy(cx, cy, duration=duration)
+        if not ok:
+            if not silent:
+                self._tc.record("WARN", f"locate 长按手势失败: {self._desc}")
+            return False
+        if not observe:
+            self._tc._log_action(
+                "long_click", f"locate[{self._desc}] observe=False", t0)
+            return True
+        time.sleep(ACTION_DELAY)
+        self._tc._log_action("long_click", f"locate[{self._desc}]", t0)
+        self._tc._auto_screenshot("长按_locate")
+        return True
 
 
 # 最近一次完成的 TestCase 实例（finish 时登记）——run_case.py 据此取最终结论定退出码
@@ -151,6 +290,15 @@ def _resolve_serial(device_id=None):
         raise RuntimeError(
             f"检测到多台设备 {devs}，请 TestCase(device_id=...) 显式指定一台")
     return devs[0]
+
+
+# 探针/探查类用例（名称以 PROBE_ / RECON_ 等前缀开头）不入库：
+# 它们是执行过程的中间调试数据，不是正式测试结果（用户确认的规则）。
+_PROBE_NAME_PREFIXES = ("PROBE_", "RECON_")
+
+def _is_probe_case(name):
+    """判断用例名是否为探针/探查类（不入库）。大小写不敏感。"""
+    return bool(name) and name.upper().startswith(_PROBE_NAME_PREFIXES)
 
 
 class TestCase:
@@ -229,11 +377,12 @@ class TestCase:
         self._db_case_id = None
         self._db_step_id = None
         self._db_step_ord = 0
-        # SQLite 记录：只记正式用例。判定标准 = script_path 是否有值：
-        #   - 经 run_case.py 执行 → 注入 DSH_CASE_SCRIPT_PATH → 正式用例，入库
-        #   - AI 直接跑临时脚本探查页面（无 script_path）→ 不入库，
-        #     探查是执行过程的中间数据，不是测试结果（用户确认的规则）
-        if self.script_path:
+        # SQLite 记录：只记正式用例。判定标准 = 有 script_path 且非探针前缀：
+        #   - 经 run_case.py 执行正式用例 → 注入 DSH_CASE_SCRIPT_PATH → 入库
+        #   - 探针/探查脚本（名称以 PROBE_ / RECON_ 开头，如 PROBE_178f /
+        #     RECON_178）→ 不入库，它们是调试中间数据，不是测试结果（用户确认规则）
+        #   - AI 直接跑临时脚本（无 script_path）→ 不入库
+        if self.script_path and not _is_probe_case(self.name):
             try:
                 from db import get_db
                 self._db = get_db()
@@ -256,6 +405,10 @@ class TestCase:
         # finish() 时直接返回旧报告，不重复"备份旧报告+二次写库"
         self._finished = False
         self._report_path = None
+        # 探针用例：进程退出兜底清理（覆盖未正常调用 finish 的悬挂场景）
+        if _is_probe_case(self.name):
+            import atexit
+            atexit.register(self._cleanup_probe_artifacts)
 
     # ── 设备命令（统一带 serial，多设备时不会操作错机器）─────────────
     def _adb(self, *args):
@@ -786,6 +939,53 @@ class TestCase:
         """按 content-desc 点击（图标按钮常用）。"""
         return self._tap_unified(desc=desc, wait=wait, observe=observe, silent=silent)
 
+    # ── 组合属性定位（新用例推荐入口）──────────────────────────────
+    # 背景：单属性定位（tap_text / tap_desc / el_bounds）语义太弱——
+    # desc="日历" 可同时命中桌面图标、widget、长按菜单；text="日历" 会
+    # 命中列表项容器+名称标签+其他页面同名节点。组合语义属性（desc+cls、
+    # text+clickable、rid+contains...）是 XPath 多条件与的等价实现，
+    # 走 _parse_nodes 同一解析通道，行为与 el_bounds/tap_* 完全同构。
+    def locate(self, rid=None, desc=None, text=None, cls=None,
+               clickable=None, contains=None):
+        """组合属性定位，返回 _Located（exists/click/long_click/bounds/center/node）。
+
+        定位优先级约定（SKILL.md）：resource-id > content-desc > text；
+        每个传入属性都必须能回答"为什么它必须成立"，答不上来的不加
+        （过度约束 = 系统改版即失效）。禁止位置索引/bounds 约束。
+
+        示例:
+            t.locate(desc="卸载", cls="android.widget.ImageView").click()
+            t.locate(desc="日历", clickable=True).long_click()   # 列表项容器
+            it = t.locate(text="恢复", contains="日历")
+            if it.wait(5): it.click()
+        """
+        spec = {k: v for k, v in dict(rid=rid, desc=desc, text=text, cls=cls,
+                                      clickable=clickable, contains=contains).items()
+                if v is not None}
+        if not spec:
+            raise ValueError("locate() 至少需要一个定位属性")
+        return _Located(self, spec)
+
+    def long_press_xy(self, x, y, duration=1.0):
+        """坐标长按（ATX 手势）。返回 bool。
+        为什么不用 input swipe 同坐标模拟：launcher 上 swipe 长按经常
+        弹不出菜单、UI 无任何变化（实测多次复现，见 knowledge/_system.md）。
+        优先 d.long_click(x, y)（u2 设备手势）；不可用时回退 touch API。"""
+        try:
+            try:
+                self.d.long_click(x, y, duration)
+            except TypeError:
+                self.d.long_click(x, y)
+            return True
+        except Exception:
+            try:
+                with self.d.touch.down(x, y):
+                    time.sleep(duration)
+                return True
+            except Exception as e:
+                print(f"[long_press_xy] 坐标长按失败 ({x},{y}): {e}")
+                return False
+
     # ── 必需操作（强语义）：找不到元素 = FAIL 并中止用例 ─────────────
     # tap_* 系列失败只记 WARN（可选步骤用）；链路关键步骤用 require_*，
     # 防止"元素没找到但后面忘了断言"导致的假通过。
@@ -1107,6 +1307,34 @@ class TestCase:
     def settings_put(self, scope, key, value):
         """写系统设置"""
         return self.adb_shell("settings", "put", scope, key, value)
+
+    # ── 旋屏约定（套件基线 = 竖屏锁定，见 docs/case-writing.md）─────────────
+    # 血泪教训：119 曾在 finally 写死 accelerometer_rotation=1"还原现场"，
+    # 结果设备立马转成横屏，下一个脚本坐标系全错、长按点到状态栏拉下
+    # 通知面板。本套件所有用例都在竖屏下执行——普通用例开头 lock_portrait
+    # 结尾不恢复（基线即竖屏锁定，"不动"就是正确的现场）；只有真正中途
+    # 转屏的用例才用 snapshot_rotation/restore_rotation 成对出现。
+    def lock_portrait(self):
+        """锁定竖屏（套件基线）。用例开头调用；结尾无需恢复。"""
+        self.adb_shell("settings", "put", "system", "accelerometer_rotation", "0")
+        self.adb_shell("settings", "put", "system", "user_rotation", "0")
+        time.sleep(0.5)
+
+    def snapshot_rotation(self):
+        """记录当前旋转状态。需要中途转屏的用例：转屏前快照，finally 恢复。"""
+        return {"accel": self.settings_get("system", "accelerometer_rotation"),
+                "user": self.settings_get("system", "user_rotation")}
+
+    def restore_rotation(self, snap):
+        """恢复 snapshot_rotation() 记录的状态（恢复"进用例时的状态"，
+        不是盲目开自动旋转）。snap 为空时为空操作。"""
+        if not snap:
+            return
+        self.adb_shell("settings", "put", "system",
+                       "accelerometer_rotation", snap.get("accel") or "0")
+        self.adb_shell("settings", "put", "system",
+                       "user_rotation", snap.get("user") or "0")
+        time.sleep(0.5)
 
     def has_network(self):
         """设备是否有活动网络（dumpsys connectivity）"""
@@ -1635,4 +1863,26 @@ class TestCase:
                 print(f"⚠️ [db] 用例完成状态入库失败: {e}")
         self._finished = True
         self._report_path = path
+        # 探针/探查用例不入库，其截图目录与报告只是调试中间产物，
+        # 执行完即清理，避免长期占用本地工作区（用户规则）。
+        if _is_probe_case(self.name):
+            self._cleanup_probe_artifacts()
         return path
+
+    # ── 探针产物清理 ────────────────────────────────────────────────
+    def _cleanup_probe_artifacts(self):
+        """探针/探查用例不入库，其截图目录与报告只是调试中间产物，执行完即清理，
+        避免长期占用本地工作区（用户规则）。幂等：目录/文件已不存在也不报错。"""
+        import shutil
+        if self.case_dir and os.path.isdir(self.case_dir):
+            try:
+                shutil.rmtree(self.case_dir, ignore_errors=True)
+                print(f"[清理] 已删除探针截图目录: {self.case_dir}")
+            except Exception as e:
+                print(f"⚠️ 探针截图目录清理失败（不影响主流程）: {e}")
+        if self._report_path and os.path.exists(self._report_path):
+            try:
+                os.remove(self._report_path)
+                print(f"[清理] 已删除探针报告: {self._report_path}")
+            except Exception as e:
+                print(f"⚠️ 探针报告清理失败（不影响主流程）: {e}")

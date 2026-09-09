@@ -21,7 +21,7 @@ bash setup.sh
 
 | 能力 | 说明 |
 |---|---|
-| 元素操作 | 元素优先定位（resource-id/text/content-desc），坐标仅兜底 |
+| 元素操作 | 元素优先定位（resource-id/content-desc/text），坐标仅兜底 |
 | 视觉定位 | tap_vision：SoM 网格 + 归一化坐标双策略，定位 view tree/OCR 无法找到的元素 |
 | 弹窗看门狗 | 主流程驱动检测权限/引导弹窗立即点击（词表快路径 + 视觉模型兜底未知弹窗；allow/deny 策略可切换） |
 | 权限测试 | 相机/图库允许+拒绝路径（拆分隔离避免 USER_FIXED 级联） |
@@ -51,6 +51,10 @@ android-gui-testing/
 │   ├── vision_tap.py       # 视觉定位（SoM 网格 + 归一化坐标 + 弹窗 bounds）
 │   ├── ocr_screen.py       # Canvas OCR 辅助
 │   └── webui.py/.html/.js/.css  # Web 测试台
+├── docs/              # SKILL.md 拆出的子文档（按需读，不常驻 Agent 上下文）
+│   ├── case-writing.md    # 写用例指南（API 速查/定位规范/关键技术/结果分类）
+│   ├── explore-guide.md   # 探索 SOP（新页面四步探查）
+│   └── OPS.md             # 运维排障（Web UI/SQLite/Windows）
 ├── knowledge/        # App 知识卡（Markdown，按包名）+ scenarios/ 场景卡
 ├── cases/            # 用例（按被测 App 包名分目录，如 cases/com.zui.calendar/172.py）
 └── tests/            # framework 纯逻辑单测（无需设备）

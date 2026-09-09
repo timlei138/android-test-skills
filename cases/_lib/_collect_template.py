@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """采集骨架模板：新页面探索的「第一步」只做采集，不做试探。
 
-工作流（详见 SKILL.md「新页面探查与用例生成 SOP」）：
+工作流（详见 docs/explore-guide.md「新页面探查与用例生成 SOP」）：
   ① 本脚本真机采集（1-3 分钟）：goto 复用 _flow 直达已知页 / app_start 冷启首页起步，
      未知下钻一轮一跳 probe_page(label) 落盘；开头 set_trace() 开采集会话档案。
   ② 离线生成库存 + 逐句预检（零真机）：
