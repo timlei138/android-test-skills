@@ -11,9 +11,10 @@
   3) 裸文件名递归精确匹配             172.py
   4) 子串模糊匹配（唯一命中才接受）    172
 查找目录：
-  1) <skill包>/cases/          （单一数据源，递归）
-  2) <framework>/cases/        （旧布局兼容，递归）
-环境变量 DSH_ANDROID_TEST_CASES 可覆盖用例目录。
+  1) <workspace>/cases/        （用户工作区，setup 首次复制后只动这里）
+  2) <skill包>/cases/          （skill 包兜底）
+  3) <framework>/cases/        （旧布局兼容）
+环境变量 DSH_WORKSPACE_CASES 可覆盖用例目录。
 """
 import ast
 import importlib.util
@@ -27,21 +28,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 def _case_dirs():
     """用例查找目录，按优先级返回。
 
-    单一数据源 = skill 包 cases/。本文件有两份拷贝（skill 包 / 工作区），
-    从工作区副本运行时 ./cases 不存在，所以末尾加 skill 包锚点兜底
-    （与 states.py 找 scenarios 的锚点逻辑同理）。
-    环境变量 DSH_ANDROID_TEST_CASES 可覆盖（优先级最高）。
+    工作区优先（setup 首次复制后用户只改工作区），skill 包兜底。
+    环境变量 DSH_WORKSPACE_CASES 可覆盖（优先级最高）。
     """
     dirs = []
-    env = os.environ.get("DSH_ANDROID_TEST_CASES")
+    env = os.environ.get("DSH_WORKSPACE_CASES")
     if env and env.strip():
         dirs.append(os.path.abspath(os.path.expanduser(env.strip())))
+    # 工作区 cases/（setup 首次复制，后续只动工作区）
+    try:
+        from db import default_test_dir
+        dirs.append(os.path.join(default_test_dir(), "cases"))
+    except Exception:
+        pass
     dirs += [
-        os.path.join(os.path.dirname(HERE), "cases"),   # 本拷贝所属包根
+        os.path.join(os.path.dirname(HERE), "cases"),   # skill 包 cases/
         os.path.join(HERE, "cases"),                    # 旧布局兼容
     ]
     skill_root = os.environ.get("DSH_SKILL_DIR") or os.path.join(
-        os.path.expanduser("~"), ".agents", "skills", "android-gui-testing")
+        os.path.expanduser("~"), ".agents", "skills", "android-test-skills")
     dirs.append(os.path.join(skill_root, "cases"))      # skill 包锚点
     seen, out = set(), []
     for d in dirs:
@@ -143,7 +148,7 @@ def warn_if_framework_drift(run_fw=None):
     except Exception:
         ws_fw = None
     skill_root = os.environ.get("DSH_SKILL_DIR") or os.path.join(
-        os.path.expanduser("~"), ".agents", "skills", "android-gui-testing")
+        os.path.expanduser("~"), ".agents", "skills", "android-test-skills")
     skill_fw = os.path.join(skill_root, "framework")
 
     dirs = [("运行副本", run_fw), ("工作区备份", ws_fw), ("skill包", skill_fw)]

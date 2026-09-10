@@ -3,7 +3,7 @@
 // 依赖：/codemirror.bundle.js 必须先于本文件加载（暴露 window.CodeMirrorYaml，历史命名）。
 
 const $ = s => document.querySelector(s);
-let cases = [], flakyMap = {}, filter = '', kbCurrent = null, kbFiles = [], currentCaseId = null;
+let cases = [], filter = '', kbCurrent = null, kbFiles = [], currentCaseId = null;
 // 统一请求封装：错误提示必须能看懂。
 // 1) 后端返回的 {"error": "..."} 只取 error 字段，不再把整坨 JSON 甩给用户；
 // 2) 连接被掐断时 fetch 只会抛一句 "Failed to fetch"，换成指向明确的提示。
@@ -24,12 +24,13 @@ const api = async (p, o) => {
 };
 
 function show(name) {
-  ['records','scripts','knowledge','vision'].forEach(v => {
+  ['dashboard','records','scripts','knowledge','vision'].forEach(v => {
     const el = $('#view-'+v);
     if (el) el.style.display = name===v ? '' : 'none';
     const nav = $('#nav-'+v);
     if (nav) nav.className = name===v ? 'active' : '';
   });
+  if (name==='dashboard') loadDashboard();
   if (name==='scripts') loadScripts();
   if (name==='knowledge' && !kbFiles.length) loadKnowledgeList();
   if (name==='vision') loadVision();
@@ -55,7 +56,7 @@ function toggleTheme() {
 
 function badge(r) { return '<span class="badge b-'+(r||'UNKNOWN')+'">'+(r||'UNKNOWN')+'</span>'; }
 function filename(p) { if(!p)return''; const i=p.replace(/\\/g,'/').lastIndexOf('/'); return i>=0?p.slice(i+1):p; }
-function imgTag(path,title) { return '<div class="shot" title="'+(title||filename(path))+'" onclick="openLightbox(\''+encodeURIComponent(path)+'\')"><img src="/api/file?path='+encodeURIComponent(path)+'" loading="lazy" alt=""><div class="shot-title">'+(title||filename(path))+'</div></div>'; }
+function imgTag(path,title) { return '<div class="shot" title="'+(title||filename(path))+'" data-lb-path="'+encodeURIComponent(path)+'"><img src="/api/file?path='+encodeURIComponent(path)+'" loading="lazy" alt=""><div class="shot-title">'+(title||filename(path))+'</div></div>'; }
 function fmtDuration(s) {
   if (s===null||s===undefined||s==='') return '-';
   if (s<1) return Math.round(s*1000)+'ms';
@@ -88,14 +89,9 @@ function hideBusy() { const b = $('#busy'); if (b) b.style.display = 'none'; }
 async function loadCases() {
   try {
     cases = await api('/api/cases');
-    try {
-      const flaky = await api('/api/flaky');
-      flakyMap = {};
-      flaky.forEach(f => { flakyMap[f.script_path] = f; });
-    } catch(e) { flakyMap = {}; }
     updateStats(); renderCases();
   }
-  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="9" class="empty">加载失败: '+e.message+'</td></tr>'; }
+  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="8" class="empty">加载失败: '+e.message+'</td></tr>'; }
 }
 function updateStats() {
   const pass = cases.filter(c => c.status==='PASS').length;
@@ -111,18 +107,6 @@ function setFilter(f) {
     if (el) el.className = 'filter-btn' + ((f||'all')===k ? ' active' : '');
   });
   renderCases();
-}
-// 通过率单元格：从 flakyMap 查找该脚本的统计，无数据时显示“-”
-function rateCell(c) {
-  // script_path 可能是绝对路径，flakyMap 键也是绝对路径，直接匹配
-  const sp = c.script_path;
-  if (!sp) return '-';
-  const f = flakyMap[sp];
-  if (!f || f.runs < 2) return '<span style="color:var(--text-3)">-</span>';
-  const pct = Math.round(f.pass_rate * 100);
-  const color = f.flaky ? 'var(--fail)' : (pct >= 80 ? 'var(--pass)' : 'var(--warn)');
-  const tag = f.flaky ? ' 🔀' : '';
-  return '<span style="color:'+color+'" title="'+f.runs+' 次执行，通过率 '+pct+'%">' + pct + '%' + tag + '</span>';
 }
 function renderCases() {
   const q = ($('#case-search').value||'').toLowerCase();
@@ -144,7 +128,6 @@ function renderCases() {
       '<td><b>'+escapeHtml(c.name)+'</b></td>' +
       '<td>'+category(c.name)+'</td>' +
       '<td>'+badge(c.status)+'</td>' +
-      '<td class="mono" style="font-size:11px">' + rateCell(c) + '</td>' +
       '<td class="mono" style="font-size:11px;color:var(--text-3)">'+fmtDateTime(c.started_at)+'</td>' +
       '<td class="mono">'+dur+'</td>' +
       '<td><div class="truncate" title="'+input+'">'+input+'</div></td>' +
@@ -273,6 +256,36 @@ async function openCase(id) {
   if (c.report_path) html += '<div class="row"><span class="label">报告</span><span class="value mono ev-link" data-ev="'+encodeURIComponent(c.report_path)+'">'+escapeHtml(c.report_path)+'</span></div>';
   html += '</div>';
 
+  // ── 失败摘要：FAIL/BLOCKED 结果顶部汇总，不用翻到底部找失败原因 ──
+  const fails = [];
+  for (const s of c.steps) {
+    for (const r of (s.results||[])) {
+      if (r.result === 'FAIL' || r.result === 'BLOCKED') {
+        fails.push({step: s.name, result: r.result, detail: r.detail});
+      }
+    }
+  }
+  if (fails.length) {
+    html += '<div class="fail-summary">';
+    html += '<div class="fail-summary-title">❌ 失败摘要（'+fails.length+' 条）</div>';
+    for (const f of fails) {
+      html += '<div class="fail-summary-item">'+badge(f.result)+' <span class="fail-step">'+escapeHtml(f.step)+'</span> — '+escapeHtml(f.detail)+'</div>';
+    }
+    html += '</div>';
+  }
+
+  // 收集所有截图路径（用于 lightbox 左右导航）
+  const allEvs = [];
+  for (const s of c.steps) {
+    for (const r of (s.results||[])) {
+      if (r.evidence) allEvs.push(encodeURIComponent(r.evidence));
+    }
+    const hasOps = s.actions && s.actions.length > 0;
+    const resultEvs = new Set((s.results||[]).map(r => r.evidence).filter(Boolean));
+    const opEvs = hasOps ? (s.evidences||[]).filter(ev => !resultEvs.has(ev)) : [];
+    for (const ev of opEvs) allEvs.push(encodeURIComponent(ev));
+  }
+
   html += '<div class="timeline">';
   for (const s of c.steps) {
     html += '<div class="step"><div class="step-dot"></div><div class="step-header"><div class="step-name">'+escapeHtml(s.name)+'</div></div>';
@@ -320,9 +333,52 @@ async function openCase(id) {
   $('#detail-panel').classList.add('open');
 }
 function closeDetail() { currentCaseId=null; $('#detail-overlay').classList.remove('open'); $('#detail-panel').classList.remove('open'); setTimeout(()=>$('#detail-body').innerHTML='',250); }
-function openLightbox(pathEnc) { $('#lightbox-img').src='/api/file?path='+pathEnc; $('#lightbox').classList.add('open'); }
-function closeLightbox() { $('#lightbox').classList.remove('open'); $('#lightbox-img').src=''; }
-document.addEventListener('click', function(e) { var t=e.target.closest?e.target.closest('.ev-link'):null; if(t&&t.dataset.ev) window.open('/api/file?path='+t.dataset.ev,'_blank'); });
+
+// ── Lightbox 导航：左右箭头 + 键盘方向键切换截图 ──
+let lbImages = [], lbIndex = 0;
+function openLightbox(pathEnc, allImages, idx) {
+  // allImages: 当前 case 的所有截图路径数组（已 encodeURIComponent）
+  // idx: 当前点击图片在 allImages 中的下标
+  if (allImages && allImages.length > 1) {
+    lbImages = allImages; lbIndex = idx || 0;
+  } else {
+    lbImages = [pathEnc]; lbIndex = 0;
+  }
+  lbShow();
+  $('#lightbox').classList.add('open');
+}
+function lbShow() {
+  $('#lightbox-img').src = '/api/file?path=' + lbImages[lbIndex];
+  const counter = $('#lb-counter');
+  if (counter) counter.textContent = (lbIndex+1) + ' / ' + lbImages.length;
+  // 单张时隐藏导航
+  const prev = $('#lb-prev'), next = $('#lb-next');
+  const show_nav = lbImages.length > 1;
+  if (prev) prev.style.display = show_nav ? '' : 'none';
+  if (next) next.style.display = show_nav ? '' : 'none';
+  if (counter) counter.style.display = show_nav ? '' : 'none';
+}
+function lbPrev() { if (lbImages.length<=1) return; lbIndex = (lbIndex-1+lbImages.length) % lbImages.length; lbShow(); }
+function lbNext() { if (lbImages.length<=1) return; lbIndex = (lbIndex+1) % lbImages.length; lbShow(); }
+function closeLightbox() { $('#lightbox').classList.remove('open'); $('#lightbox-img').src=''; lbImages=[]; lbIndex=0; }
+document.addEventListener('keydown', function(e) {
+  if (!$('#lightbox').classList.contains('open')) return;
+  if (e.key === 'ArrowLeft') { e.preventDefault(); lbPrev(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); lbNext(); }
+  else if (e.key === 'Escape') closeLightbox();
+});
+document.addEventListener('click', function(e) {
+  var t=e.target.closest?e.target.closest('.ev-link'):null;
+  if(t&&t.dataset.ev) window.open('/api/file?path='+t.dataset.ev,'_blank');
+  // Lightbox：点击 .shot 截图时打开，传入全量图片列表与当前下标
+  var shot = e.target.closest?e.target.closest('.shot'):null;
+  if (shot && shot.dataset.lbPath) {
+    const shots = [...document.querySelectorAll('.shot[data-lb-path]')];
+    const paths = shots.map(s => s.dataset.lbPath);
+    const idx = shots.indexOf(shot);
+    openLightbox(shot.dataset.lbPath, paths, idx);
+  }
+});
 
 // ── Case 用例管理 ──
 
@@ -836,3 +892,69 @@ async function testVision() {
 initKbEditor();
 loadCases();
 loadScripts();
+
+// ── Dashboard ──────────────────────────────────────────────────────────
+let dashLoaded = false;
+async function loadDashboard() {
+  try {
+    const d = await api('/api/dashboard');
+    // 顶部统计卡
+    const s = d.summary;
+    const pct = s.total ? Math.round(s.pass_rate * 100) : 0;
+    const pctColor = pct >= 80 ? 'pass' : (pct >= 50 ? 'warn' : 'fail');
+    $('#dash-stats').innerHTML =
+      '<div class="dash-stat"><div class="dash-stat-label">总执行</div><div class="dash-stat-value accent">'+s.total+'</div></div>' +
+      '<div class="dash-stat"><div class="dash-stat-label">通过率</div><div class="dash-stat-value '+pctColor+'">'+pct+'%</div><div class="dash-stat-sub">'+s.pass+' / '+s.total+'</div></div>' +
+      '<div class="dash-stat"><div class="dash-stat-label">成功</div><div class="dash-stat-value pass">'+s.pass+'</div></div>' +
+      '<div class="dash-stat"><div class="dash-stat-label">失败</div><div class="dash-stat-value fail">'+s.fail+'</div></div>' +
+      '<div class="dash-stat"><div class="dash-stat-label">Flaky</div><div class="dash-stat-value '+(d.flaky_top.length?'warn':'')+'">'+s.flaky_count+'</div></div>';
+    // Flaky Top 10
+    const flakyEl = $('#dash-flaky');
+    if (!d.flaky_top.length) {
+      flakyEl.innerHTML = '<div class="empty" style="padding:20px">暂无 flaky 用例</div>';
+    } else {
+      flakyEl.innerHTML = d.flaky_top.map(f => {
+        const p = Math.round(f.pass_rate * 100);
+        const color = p < 30 ? 'var(--fail)' : (p < 70 ? 'var(--warn)' : 'var(--pass)');
+        const name = f.script_path ? f.script_path.split(/[\\/]/).pop().replace(/\.py$/,'') : '?';
+        return '<div class="dash-row">' +
+          '<div class="dash-row-name" title="'+escapeHtml(f.script_path||'')+'">'+escapeHtml(name)+'</div>' +
+          '<div class="dash-row-bar"><div class="dash-row-bar-fill" style="width:'+p+'%;background:'+color+'"></div></div>' +
+          '<div class="dash-row-pct" style="color:'+color+'">'+p+'%</div>' +
+          '<div class="dash-row-runs">'+f.runs+'次</div>' +
+        '</div>';
+      }).join('');
+    }
+    // 按类别通过率
+    const catEl = $('#dash-category');
+    if (!d.by_category.length) {
+      catEl.innerHTML = '<div class="empty" style="padding:20px">暂无数据</div>';
+    } else {
+      catEl.innerHTML = d.by_category.map(c => {
+        const p = Math.round(c.pass_rate * 100);
+        const color = p >= 80 ? 'var(--pass)' : (p >= 50 ? 'var(--warn)' : 'var(--fail)');
+        return '<div class="dash-row">' +
+          '<div class="dash-row-name">'+escapeHtml(c.category)+'</div>' +
+          '<div class="dash-row-bar"><div class="dash-row-bar-fill" style="width:'+p+'%;background:'+color+'"></div></div>' +
+          '<div class="dash-row-pct" style="color:'+color+'">'+p+'%</div>' +
+          '<div class="dash-row-runs">'+c.runs+'次</div>' +
+        '</div>';
+      }).join('');
+    }
+    dashLoaded = true;
+  } catch(e) {
+    $('#dash-stats').innerHTML = '<div class="empty">加载失败: '+e.message+'</div>';
+  }
+}
+
+// ── 版本号：侧栏底部常驻，快速确认是否为最新版本 ──
+(async function loadVersion() {
+  try {
+    const v = await api('/api/version');
+    const el = $('#version-info');
+    if (el) el.textContent = v.version || v.commit || '-';
+  } catch(_) {
+    const el = $('#version-info');
+    if (el) el.textContent = '';
+  }
+})();

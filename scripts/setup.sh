@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# android-gui-testing skill 一键环境安装
+# android-test-skills skill 一键环境安装
 # 用法: bash setup.sh [--with-agent]
 set -e
 
-HERE="$(cd "$(dirname "$0")" && pwd)"
-WORKSPACE="${1:-$HOME/dsh-android-test}"
+HERE="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE="${1:-$HOME/android-test-skills-data}"
 PYTHON="${PYTHON:-python3}"
 
 echo "════════════════════════════════════════════"
@@ -50,15 +50,26 @@ else
     echo "     $WORKSPACE/.venv/bin/python -m uiautomator2 init"
 fi
 
-# 5. 建工作区数据目录
-echo "▶ 5/5 建工作区数据目录..."
-# 代码（framework/）、用例（cases/）、知识卡（knowledge/）一律留在 skill 包 —— 那是 Agent
-# 实际加载的地方，也是唯一权威。工作区只放运行产物：换 Agent 也能共享，重装 skill 不会丢。
-# 不要往工作区复制 framework/：run_case.ps1 优先用 skill 包那份，复制过去只会多一份
-# 需要维护的副本（还会触发 run_case.py 的副本比对告警）。
-mkdir -p "$WORKSPACE/storage/reports" "$WORKSPACE/storage/screenshots"
-echo "  ✅ 运行产物目录: $WORKSPACE/storage/{reports,screenshots}"
-echo "  ✅ 代码/用例/知识卡: $HERE/{framework,cases,knowledge}（单一数据源）"
+# 5. 建工作区数据目录 + 首次复制 cases/knowledge
+echo "▶ 5/5 初始化工作区..."
+# 运行产物目录
+mkdir -p "$WORKSPACE/storage/reports" "$WORKSPACE/storage/screenshots" "$WORKSPACE/storage/logs"
+echo "  ✅ 运行产物: $WORKSPACE/storage/{reports,screenshots,logs}"
+
+# 首次复制：cases/ + knowledge/（仅工作区不存在时复制，后续修改只动工作区）
+if [ ! -d "$WORKSPACE/cases" ]; then
+    cp -r "$HERE/cases" "$WORKSPACE/cases"
+    echo "  ✅ 首次复制 cases/ → $WORKSPACE/cases"
+else
+    echo "  ℹ️  cases/ 已存在，跳过（后续修改只动工作区副本）"
+fi
+if [ ! -d "$WORKSPACE/knowledge" ]; then
+    cp -r "$HERE/knowledge" "$WORKSPACE/knowledge"
+    echo "  ✅ 首次复制 knowledge/ → $WORKSPACE/knowledge"
+else
+    echo "  ℹ️  knowledge/ 已存在，跳过"
+fi
+echo "  ✅ 代码/基线: $HERE/{framework,docs,evals,tests}（只读，不改工作区副本）"
 
 # 可选: AutoGLM agent 环境
 if [ "$1" = "--with-agent" ]; then

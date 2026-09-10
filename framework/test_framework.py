@@ -18,8 +18,8 @@ import uiautomator2 as u2
 #   storage/screenshots  截图证据（每次执行一个 case_<时间戳> 子目录）
 #   storage/reports      Markdown 测试报告
 # 用例与知识卡（单一数据源，随版本同步）→ <skill包>/cases、<skill包>/knowledge
-# 工作区根目录与 SQLite（db.default_test_dir）同源：环境变量 DSH_ANDROID_TEST_DIR
-# > 默认 ~/dsh-android-test。不随 framework 副本位置漂移——从 skill 包副本直接
+# 工作区根目录与 SQLite（db.default_test_dir）同源：环境变量 DSH_WORKSPACE_DIR
+# > 默认 ~/android-test-skills-data。不随 framework 副本位置漂移——从 skill 包副本直接
 # 运行时，截图/报告/探查缓存仍落同一工作区，与 test_records.db 保持一致。
 try:
     from db import default_test_dir

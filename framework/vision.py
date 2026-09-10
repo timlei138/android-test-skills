@@ -23,14 +23,14 @@ CREDENTIALS_FILE = os.path.join(os.path.expanduser("~"), ".dsh", ".credentials.y
 
 # 工作区视觉配置（Web UI「视觉模型」页保存；工作区只存运行产物，不进 skill 包）
 def _workspace_dir() -> str:
-    env = os.environ.get("DSH_ANDROID_TEST_DIR")
+    env = os.environ.get("DSH_WORKSPACE_DIR")
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
     try:
         from db import default_test_dir
         return default_test_dir()
     except Exception:
-        return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+        return os.path.join(os.path.expanduser("~"), "android-test-skills-data")
 
 
 VISION_CONF_FILE = None  # 惰性求值：import 后改环境变量仍生效

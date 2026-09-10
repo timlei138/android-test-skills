@@ -179,7 +179,7 @@ def main():
     if storage_arg:
         storage_dirs = [storage_arg]
     else:
-        ws = os.environ.get("DSH_ANDROID_TEST_DIR", root)
+        ws = os.environ.get("DSH_WORKSPACE_DIR", root)
         storage_dirs = [
             os.path.join(ws, "storage", "probes"),
             os.path.join(ws, "storage", "traces"),

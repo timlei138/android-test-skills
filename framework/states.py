@@ -220,11 +220,11 @@ def _scenarios_dirs():
     # 工作区：环境变量是唯一可靠来源。不能从 here 推导 —— 工作区里的 states.py
     # 算出来的"包根"就是工作区自己，两个候选会撞成同一个不存在的目录
     # （sync 不同步 knowledge/，工作区那个目录本来就没有）。
-    ws = os.environ.get("DSH_ANDROID_TEST_DIR")
+    ws = os.environ.get("DSH_WORKSPACE_DIR")
 
     # skill 包：同理不能只靠 pkg —— 工作区副本会指到自己。
     # 锚点优先级：显式环境变量 DSH_SKILL_DIR（run_case.ps1/webui.ps1 会设置，
-    # 也支持自定义安装位置）> 默认安装位置（~/.agents/skills/android-gui-testing）。
+    # 也支持自定义安装位置）> 默认安装位置（~/.agents/skills/android-test-skills）。
     # 环境变量是用户显式声明的意图，必须排在硬编码默认值前面。
     anchors = []
     env_pkg = os.environ.get("DSH_SKILL_DIR")
@@ -232,7 +232,7 @@ def _scenarios_dirs():
         anchors.append(os.path.join(env_pkg, "knowledge", "scenarios"))
     home = os.path.expanduser("~")
     if home and home != "~":
-        anchors.append(os.path.join(home, ".agents", "skills", "android-gui-testing",
+        anchors.append(os.path.join(home, ".agents", "skills", "android-test-skills",
                                     "knowledge", "scenarios"))
     anchors.append(os.path.join(pkg, "knowledge", "scenarios"))
 

@@ -18,7 +18,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "framework"))
 
 # webui 模块级会解析工作区路径；指到临时目录避免读写真实工作区
-os.environ.setdefault("DSH_ANDROID_TEST_DIR",
+os.environ.setdefault("DSH_WORKSPACE_DIR",
                       os.path.join(tempfile.gettempdir(), "dsh-unittest-ws"))
 
 import db         # noqa: E402

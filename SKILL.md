@@ -1,5 +1,5 @@
 ---
-name: android-gui-testing
+name: android-test-skills
 description: Android 设备黑盒 GUI 功能测试。用户给测试用例（步骤+预期），按本 skill 驱动已连接设备执行并输出带证据的测试报告。内置 uiautomator2 框架、Canvas OCR 读取、点按滚轮控制器、置灰像素断言、视觉定位（SoM 网格/归一化坐标双策略）、知识卡（按前台包名检索 App 操作经验）、PASS/FAIL/BLOCKED/ERROR 结果分类。
 ---
 
@@ -11,19 +11,21 @@ description: Android 设备黑盒 GUI 功能测试。用户给测试用例（步
 
 ```bash
 adb devices -l                      # 设备在线且已授权
-# 框架位于本 skill 目录:
-#   framework/test_framework.py  测试框架
-#   framework/run_case.py        用例执行器
-#   knowledge/*.md              知识卡（按前台包名检索加载 App 操作经验）
-#   cases/<包名>/*.py           用例（按被测 App 包名分目录，随版本同步，团队共享）
+# skill 包（只读）vs 工作区（可写）:
+#   skill包/framework/*.py      测试框架与执行器（升级 skill 包即更新，不改工作区）
+#   skill包/scripts/*.sh|ps1    安装/执行/运维脚本
+#   工作区/cases/<包名>/*.py    用例（setup 时从 skill 包复制，之后编辑只改工作区副本）
+#   工作区/knowledge/*.md       知识卡（同上，按前台包名检索加载 App 操作经验）
+#   工作区/storage/             运行产物（截图/报告/探查缓存/测试库）
 ```
 
 ### 安装与运行
 
-- 安装：`bash setup.sh`（Windows：`pwsh -File setup.ps1`）；依赖 `uiautomator2` + `rapidocr_onnxruntime`，
-  Python 3.10+（`str | None` 语法要求）。默认工作区 `~/dsh-android-test`
-- 跑用例：`.venv/bin/python run_case.py com.zui.calendar/172.py`
-  （Windows：`pwsh -File run_case.ps1 -Case "com.zui.calendar/172.py"`）
+- 安装：`bash scripts/setup.sh`（Windows：`pwsh -File scripts/setup.ps1`）；依赖 `uiautomator2` + `rapidocr_onnxruntime`，
+  Python 3.10+（`str | None` 语法要求）。默认工作区 `~/android-test-skills-data`
+  （setup 会把 `cases/` 与 `knowledge/` 复制进工作区，**之后编辑一律改工作区副本**）
+- 跑用例：`<工作区>/.venv/bin/python framework/run_case.py com.zui.calendar/172.py`
+  （在 skill 包根目录执行；Windows：`pwsh -File scripts/run_case.ps1 -Case "com.zui.calendar/172.py"`）
 - 单测（改 framework/ 后必跑，无需设备）：`python -m unittest discover -s tests -v`
   ——改的就是 skill 包里那份，不用再同步到工作区
 - 安装细节/脚本参数/运维排障 → `docs/OPS.md`（人类快速开始 → README）
@@ -98,8 +100,8 @@ adb devices -l                      # 设备在线且已授权
 
 ## 测试记录（SQLite）与 Web 前端
 
-- 每次执行自动入库 `~/dsh-android-test/storage/test_records.db`（用例/步骤/断言结果，含状态快照与证据路径）
-- Web 测试台：`./webui.sh`（Windows：`pwsh -File webui.ps1 start`）→ http://127.0.0.1:8900
+- 每次执行自动入库 `~/android-test-skills-data/storage/test_records.db`（用例/步骤/断言结果，含状态快照与证据路径）
+- Web 测试台：`./scripts/webui.sh`（Windows：`pwsh -File scripts/webui.ps1 start`）→ http://127.0.0.1:8900
   - **测试记录**页：用例列表 → 详情含 用户输入/脚本/状态/证据
   - **知识库**页：编辑 `knowledge/*.md`（`_template.md` 只读；`_system.md` 禁删可编辑）
   - **视觉模型**页：配置凭据（未配置时视觉断言降级 WARN，见下）
@@ -107,17 +109,18 @@ adb devices -l                      # 设备在线且已授权
 
 ### 代码与数据分开放（skill 包 / 工作区）
 
-**代码改 skill 包，数据留工作区** —— 两边各一份、各司其职：
+**代码在 skill 包（只读），编辑目标在工作区** —— 两边各司其职：
 
 | | 放哪 | 为什么 |
 |---|---|---|
-| **代码** `framework/` + 根目录脚本 + `SKILL.md` | skill 包（唯一） | Agent 加载的就是这里，改完直接生效 |
-| **资产** `cases/` + `knowledge/` | skill 包（唯一） | 版本历史（git）比本地副本有用 |
-| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
+| **代码** `framework/` + `scripts/` + `docs/` + `SKILL.md` | skill 包（唯一，只读） | Agent 加载的就是这里；升级/重装 skill 包不碰用户数据 |
+| **可编辑资产** `cases/` + `knowledge/` | 工作区（唯一编辑目标，setup 时从 skill 包复制） | 用户的用例与知识积累留在自己地盘，跨会话共享 |
+| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 重装 skill 包不会被清空 |
 
-**代码唯一权威是 skill 包**：`run_case.ps1` 的搜索顺序是 skill 包在前、工作区备份在后。
-反过来排会导致「改了 skill 包、跑用例却命中工作区旧副本」的静默失效，**别改回去**
-（论证与 sync 脚本说明 → `docs/OPS.md`）。
+**工作区副本是唯一编辑目标**：`run_case.py` 的搜索顺序是工作区在前、skill 包兜底
+（未跑过 setup 时兜底命中 skill 包）。改用例/知识卡一律改工作区那份——
+改 skill 包里的原始副本不会生效，**别改回去**
+（首次复制与同步说明 → `docs/OPS.md`）。
 
 ### 视觉模型配置
 入口：Web UI 左侧「视觉模型」页（或设 `DEEPSEEK_API_KEY` 环境变量）。
@@ -194,10 +197,10 @@ grep -rl "<触发词>" knowledge/scenarios/     # 定位场景卡
 （同名卡以先扫到的为准，因此工作区的卡可覆盖 skill 包的同名卡）：
 
 1. `DSH_SCENARIOS_DIR` —— 显式指定的场景卡目录（自测用）
-2. `$DSH_ANDROID_TEST_DIR/knowledge/scenarios/` —— 测试工作区（本地改的卡先生效）
+2. `$DSH_WORKSPACE_DIR/knowledge/scenarios/` —— 测试工作区（本地改的卡先生效）
 3. `$DSH_SKILL_DIR/knowledge/scenarios/` —— 环境变量指定的 skill 包位置
    （`run_case.ps1` / `webui.ps1` 启动时自动设置，也支持自定义安装位置）
-4. `~/.agents/skills/android-gui-testing/knowledge/scenarios/` —— 默认安装位置
+4. `~/.agents/skills/android-test-skills/knowledge/scenarios/` —— 默认安装位置
 5. states.py 自身所在包（即本 skill 包）的 `knowledge/scenarios/`
 
 ## 使用者如何添加知识/用例

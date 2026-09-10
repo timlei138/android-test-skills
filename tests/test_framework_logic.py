@@ -8,7 +8,7 @@
     python -m unittest discover -s tests -v
 _parse_nodes 的用例需要 uiautomator2（import test_framework 依赖），
 系统 Python 没有时会自动跳过；用工作区 venv 跑可覆盖全部：
-    ~/dsh-android-test/.venv/bin/python -m unittest discover -s tests -v
+    ~/android-test-skills-data/.venv/bin/python -m unittest discover -s tests -v
 """
 import contextlib
 import io
@@ -24,7 +24,7 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "framework"))
 
 # webui 模块级会解析工作区路径；指到临时目录避免读写真实工作区
-os.environ.setdefault("DSH_ANDROID_TEST_DIR",
+os.environ.setdefault("DSH_WORKSPACE_DIR",
                       os.path.join(tempfile.gettempdir(), "dsh-unittest-ws"))
 
 import db        # noqa: E402
@@ -220,8 +220,8 @@ class TestFrameworkDrift(unittest.TestCase):
             # 三方比对：把运行副本注入成工作区那份（真实 HERE 是开发仓，内容不同）
             run_fw = os.path.join(td, "ws", "framework")
             old = {k: os.environ.get(k)
-                   for k in ("DSH_ANDROID_TEST_DIR", "DSH_SKILL_DIR")}
-            os.environ["DSH_ANDROID_TEST_DIR"] = os.path.join(td, "ws")
+                   for k in ("DSH_WORKSPACE_DIR", "DSH_SKILL_DIR")}
+            os.environ["DSH_WORKSPACE_DIR"] = os.path.join(td, "ws")
             os.environ["DSH_SKILL_DIR"] = os.path.join(td, "skill")
             try:
                 buf = io.StringIO()
@@ -255,8 +255,8 @@ class TestFrameworkDrift(unittest.TestCase):
                 with open(os.path.join(run, f), "w", encoding="utf-8") as fh:
                     fh.write("newer")          # 运行副本比另外两份新
             old = {k: os.environ.get(k)
-                   for k in ("DSH_ANDROID_TEST_DIR", "DSH_SKILL_DIR")}
-            os.environ["DSH_ANDROID_TEST_DIR"] = os.path.join(td, "ws")
+                   for k in ("DSH_WORKSPACE_DIR", "DSH_SKILL_DIR")}
+            os.environ["DSH_WORKSPACE_DIR"] = os.path.join(td, "ws")
             os.environ["DSH_SKILL_DIR"] = os.path.join(td, "skill")
             try:
                 buf = io.StringIO()
@@ -461,12 +461,12 @@ class TestCasePackageInference(unittest.TestCase):
         return t
 
     def test_infers_from_windows_script_path(self):
-        t = self._mk("C:\\Users\\u\\.agents\\skills\\android-gui-testing"
+        t = self._mk("C:\\Users\\u\\.agents\\skills\\android-test-skills"
                      "\\cases\\com.zui.calendar\\168.py")
         self.assertEqual(t._case_package_from_script(), "com.zui.calendar")
 
     def test_infers_from_posix_script_path(self):
-        t = self._mk("/home/u/skills/android-gui-testing/cases/com.a.b/172.py")
+        t = self._mk("/home/u/skills/android-test-skills/cases/com.a.b/172.py")
         self.assertEqual(t._case_package_from_script(), "com.a.b")
 
     def test_non_package_dir_returns_none(self):
@@ -534,16 +534,16 @@ class TestVisionAuth(unittest.TestCase):
 class TestArtifactPath(unittest.TestCase):
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
-        self._old = os.environ.get("DSH_ANDROID_TEST_DIR")
-        os.environ["DSH_ANDROID_TEST_DIR"] = self._td.name
+        self._old = os.environ.get("DSH_WORKSPACE_DIR")
+        os.environ["DSH_WORKSPACE_DIR"] = self._td.name
         self.shots = os.path.join(self._td.name, "storage", "screenshots")
         os.makedirs(self.shots)
 
     def tearDown(self):
         if self._old is None:
-            os.environ.pop("DSH_ANDROID_TEST_DIR", None)
+            os.environ.pop("DSH_WORKSPACE_DIR", None)
         else:
-            os.environ["DSH_ANDROID_TEST_DIR"] = self._old
+            os.environ["DSH_WORKSPACE_DIR"] = self._old
         self._td.cleanup()
 
     def test_inside_outside(self):
@@ -1272,21 +1272,21 @@ class TestVisionConfLazyEval(unittest.TestCase):
     """import vision 后改环境变量，_vision_conf_path() 应反映新路径。"""
 
     def test_lazy_eval_after_env_change(self):
-        old = os.environ.get("DSH_ANDROID_TEST_DIR")
+        old = os.environ.get("DSH_WORKSPACE_DIR")
         try:
-            os.environ["DSH_ANDROID_TEST_DIR"] = "/tmp/test_ws_1"
+            os.environ["DSH_WORKSPACE_DIR"] = "/tmp/test_ws_1"
             p1 = vision._vision_conf_path()
             self.assertIn("test_ws_1", p1)
 
-            os.environ["DSH_ANDROID_TEST_DIR"] = "/tmp/test_ws_2"
+            os.environ["DSH_WORKSPACE_DIR"] = "/tmp/test_ws_2"
             p2 = vision._vision_conf_path()
             self.assertIn("test_ws_2", p2)
             self.assertNotEqual(p1, p2)
         finally:
             if old is None:
-                os.environ.pop("DSH_ANDROID_TEST_DIR", None)
+                os.environ.pop("DSH_WORKSPACE_DIR", None)
             else:
-                os.environ["DSH_ANDROID_TEST_DIR"] = old
+                os.environ["DSH_WORKSPACE_DIR"] = old
 
 
 # ── 阶段四：学习词表 (mtime, words) 缓存 ──────────────────────
@@ -1351,8 +1351,8 @@ class TestSetupLogging(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             ws = os.path.join(td, "ws")
             os.makedirs(os.path.join(ws, "storage"))
-            old = os.environ.get("DSH_ANDROID_TEST_DIR")
-            os.environ["DSH_ANDROID_TEST_DIR"] = ws
+            old = os.environ.get("DSH_WORKSPACE_DIR")
+            os.environ["DSH_WORKSPACE_DIR"] = ws
             try:
                 log_path = run_case._setup_logging()
                 self.assertTrue(os.path.isfile(log_path))
@@ -1363,9 +1363,9 @@ class TestSetupLogging(unittest.TestCase):
                 self.assertIn("日志文件", content)
             finally:
                 if old is None:
-                    os.environ.pop("DSH_ANDROID_TEST_DIR", None)
+                    os.environ.pop("DSH_WORKSPACE_DIR", None)
                 else:
-                    os.environ["DSH_ANDROID_TEST_DIR"] = old
+                    os.environ["DSH_WORKSPACE_DIR"] = old
                 # 清理 logging handler 避免污染其它测试
                 import logging
                 for h in logging.getLogger().handlers[:]:

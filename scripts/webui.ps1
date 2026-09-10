@@ -8,7 +8,7 @@
 #   pwsh -File webui.ps1 status
 #
 # 等价于 macOS/Linux 的 ./webui.sh。数据目录（SQLite + 知识库）由
-# DSH_ANDROID_TEST_DIR 决定，默认 ~/dsh-android-test，保证从任何位置启动
+# DSH_WORKSPACE_DIR 决定，默认 ~/android-test-skills-data，保证从任何位置启动
 # 都读写同一个库与知识库。
 
 [CmdletBinding()]
@@ -21,16 +21,16 @@ param(
 
     [string]$Host = '127.0.0.1',
 
-    [string]$Workspace = $(if ($env:DSH_ANDROID_TEST_DIR) { $env:DSH_ANDROID_TEST_DIR }
-                           else { Join-Path $HOME 'dsh-android-test' })
+    [string]$Workspace = $(if ($env:DSH_WORKSPACE_DIR) { $env:DSH_WORKSPACE_DIR }
+                           else { Join-Path $HOME 'android-test-skills-data' })
 )
 
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-$SkillDir  = $PSScriptRoot
+$SkillDir  = Split-Path -Parent $PSScriptRoot
 $WebUI     = Join-Path $SkillDir 'framework\webui.py'
-$VenvPy    = if ($env:DSH_ANDROID_TEST_VENV) { Join-Path $env:DSH_ANDROID_TEST_VENV 'Scripts\python.exe' }
+$VenvPy    = if ($env:DSH_WORKSPACE_VENV) { Join-Path $env:DSH_WORKSPACE_VENV 'Scripts\python.exe' }
              else { Join-Path $Workspace '.venv\Scripts\python.exe' }
 $PidFile   = Join-Path $SkillDir '.webui.pid'
 $LogFile   = Join-Path $SkillDir 'webui.log'
@@ -119,7 +119,7 @@ switch ($Action) {
         Remove-Item -LiteralPath $PidFile -Force -ErrorAction SilentlyContinue
 
         # 显式指定数据目录与 skill 包位置，保证从任何位置启动都读写同一份资产
-        $env:DSH_ANDROID_TEST_DIR = $Workspace
+        $env:DSH_WORKSPACE_DIR = $Workspace
         $env:DSH_SKILL_DIR = $SkillDir
         # webui.py 会打印 emoji（📊）等 BMP 外字符，Windows 默认 GBK stdout
         # 无法编码会直接 UnicodeEncodeError 退出，故强制 UTF-8 输出。

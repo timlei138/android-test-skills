@@ -9,15 +9,15 @@
 #   pwsh -File run_case.ps1 -Case "172"                      # 模糊匹配，自动补 .py
 #
 # 等价于 macOS/Linux 的:
-#   cd ~/dsh-android-test/framework && .venv/bin/python run_case.py <用例>
+#   cd ~/android-test-skills-data/framework && .venv/bin/python run_case.py <用例>
 #
 # 报告输出: <Workspace>\storage\reports\<用例名>_报告.md
 
 [CmdletBinding()]
 param(
     [string]$Case,
-    [string]$Workspace = $(if ($env:DSH_ANDROID_TEST_DIR) { $env:DSH_ANDROID_TEST_DIR }
-                           else { Join-Path $HOME 'dsh-android-test' }),
+    [string]$Workspace = $(if ($env:DSH_WORKSPACE_DIR) { $env:DSH_WORKSPACE_DIR }
+                           else { Join-Path $HOME 'android-test-skills-data' }),
     [string]$Python,
     [switch]$List
 )
@@ -25,22 +25,13 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-$SkillDir = $PSScriptRoot
+$SkillDir = Split-Path -Parent $PSScriptRoot
 $VenvPy = if ($Python) { $Python } else { Join-Path $Workspace '.venv\Scripts\python.exe' }
 
-# 搜索顺序：skill 包优先，工作区兜底。
-#
-# 为什么 skill 包必须在前：Agent 加载的就是 skill 包（SKILL.md / cases/ / knowledge/
-# 全从那里读），代码也必须同源。反过来排的话，改了 skill 包的代码、跑用例却命中
-# 工作区的旧副本，改动静默失效且不报错 —— 这正是「改了没生效」类问题的根源。
-# 工作区那份是 setup.sh 复制的历史备份，留着无害，但不再参与运行。
-#
-# 注意连带效应：run_case.py 会把自身所在目录插到 sys.path[0]，所以这里选中哪份
-# run_case.py，整套框架（test_framework / db / states / vision…）都跟着那份走，
-# 不是只影响一个文件。同理 cases/ 也会从被选中那份的上一级目录找起。
+# 搜索顺序：工作区优先（首次 setup 复制后的用户修改），skill 包兜底。
 $FrameworkDirs = @(
-    (Join-Path $SkillDir 'framework'),     # 唯一权威：Agent 实际加载的那份
-    (Join-Path $Workspace 'framework')     # 兜底：setup 复制的历史副本
+    (Join-Path $SkillDir 'framework'),     # skill 包（Agent 加载的那份）
+    (Join-Path $Workspace 'framework')     # 工作区兜底
 )
 
 # ------------------------------------------------------------- 前置检查
@@ -64,8 +55,9 @@ if (-not $runner) {
 }
 
 # --------------------------------------------------------------- 列用例
-# 用例单一数据源 = <skill包>\cases（随版本同步，团队共享）；fwDir 为旧布局兼容
+# 用例查找：工作区优先（用户修改只动工作区），skill 包兜底
 $caseDirs = @(
+    (Join-Path $Workspace 'cases'),
     (Join-Path $SkillDir 'cases'),
     (Join-Path $fwDir 'cases')
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
@@ -144,7 +136,7 @@ if (-not $casePath) {
 }
 
 # ---------------------------------------------------------------- 启动 Web UI
-$webuiScript = Join-Path $SkillDir 'webui.ps1'
+$webuiScript = Join-Path $SkillDir 'scripts\webui.ps1'
 if (Test-Path -LiteralPath $webuiScript) {
     try {
         $statusOutput = & pwsh -NoProfile -ExecutionPolicy Bypass -File $webuiScript status 2>&1 | Out-String

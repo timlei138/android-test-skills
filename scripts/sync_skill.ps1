@@ -8,23 +8,23 @@
 #   framework/*  —— 代码（webui.py/.html/.js/.css、test_framework.py、run_case.py…）
 #   tests/*.py   —— 单元测试（否则工作区 tests/ 是空目录，跑单测会报 Start directory
 #                   is not importable）
-#   根目录脚本  —— run_case.ps1 / setup.* / webui.* / export.sh
+#   scripts/ 下的脚本  —— run_case.ps1 / setup.* / webui.* / export.sh / sync_skill.ps1
 #   SKILL.md     —— 技能说明（工作区与 skill 包保持一致）
 #
 # 不同步（内容/运行产物，各居其位）：
-#   cases/ knowledge/  → 只在 skill 包（单一数据源，随版本同步）
+#   cases/ knowledge/  → 首次 setup 时复制到工作区，之后工作区是单一数据源
 #   storage/（含 test_records.db） .venv/ → 只在工作区（运行产物，机器私有）
 
 param([switch]$ToSkill)
 
 $ErrorActionPreference = 'Stop'
 $SkillDir = Split-Path -Parent $PSScriptRoot
-$Workspace = if ($env:DSH_ANDROID_TEST_DIR) { $env:DSH_ANDROID_TEST_DIR }
-             else { Join-Path $HOME 'dsh-android-test' }
+$Workspace = if ($env:DSH_WORKSPACE_DIR) { $env:DSH_WORKSPACE_DIR }
+             else { Join-Path $HOME 'android-test-skills-data' }
 
 if (-not (Test-Path -LiteralPath $Workspace)) {
     Write-Host "工作区不存在: $Workspace" -ForegroundColor Red
-    Write-Host "请设置 DSH_ANDROID_TEST_DIR 或先运行 setup.ps1" -ForegroundColor Yellow
+    Write-Host "请设置 DSH_WORKSPACE_DIR 或先运行 setup.ps1" -ForegroundColor Yellow
     exit 1
 }
 
@@ -45,9 +45,13 @@ Get-ChildItem (Join-Path $from 'framework') -File -ErrorAction SilentlyContinue 
 Get-ChildItem (Join-Path $from 'tests') -File -Filter '*.py' -ErrorAction SilentlyContinue | ForEach-Object {
     $files += Join-Path 'tests' $_.Name
 }
-# 根目录脚本与文档
-foreach ($n in @('SKILL.md','run_case.ps1','setup.ps1','setup.sh','webui.ps1','webui.sh','export.sh')) {
+# scripts/ 下的脚本与文档
+foreach ($n in @('SKILL.md')) {
     if (Test-Path -LiteralPath (Join-Path $from $n)) { $files += $n }
+}
+foreach ($n in @('run_case.ps1','setup.ps1','setup.sh','webui.ps1','webui.sh','export.sh','sync_skill.ps1')) {
+    $rel = Join-Path 'scripts' $n
+    if (Test-Path -LiteralPath (Join-Path $from $rel)) { $files += $rel }
 }
 
 $copied = 0; $skipped = 0; $failed = 0
@@ -95,6 +99,6 @@ if ($bad) {
 if (-not $ToSkill) {
     Write-Host ""
     Write-Host "提示：同步后需重启 Web UI 才生效：" -ForegroundColor DarkGray
-    Write-Host "  pwsh -File (Join-Path '$SkillDir' 'webui.ps1') stop" -ForegroundColor DarkGray
-    Write-Host "  pwsh -File (Join-Path '$SkillDir' 'webui.ps1') start" -ForegroundColor DarkGray
+    Write-Host "  pwsh -File (Join-Path '$SkillDir' 'scripts\webui.ps1') stop" -ForegroundColor DarkGray
+    Write-Host "  pwsh -File (Join-Path '$SkillDir' 'scripts\webui.ps1') start" -ForegroundColor DarkGray
 }

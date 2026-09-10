@@ -1,17 +1,17 @@
-# android-gui-testing
+# android-test-skills
 
 Android 设备黑盒 GUI 测试技能包：**你给测试用例，它驱动设备执行，输出带证据的测试报告**。
 
 ## 5 分钟快速开始
 
 ```bash
-# 1. 装环境（自动建 venv、装依赖、初始化设备端）
-bash setup.sh
-# Windows: pwsh -File setup.ps1（脚本参数与细节见 docs/OPS.md）
+# 1. 装环境（自动建 venv、装依赖、初始化设备端、复制 cases/knowledge 到工作区）
+bash scripts/setup.sh
+# Windows: pwsh -File scripts/setup.ps1（脚本参数与细节见 docs/OPS.md）
 
-# 2. 跑示例用例（在 skill 包根目录跑；用例在 cases/<包名>/ 下，随版本同步）
+# 2. 跑示例用例（工作区 cases/ 是单一数据源，setup 时从 skill 包复制）
 .venv/bin/python run_case.py com.zui.calendar/172.py
-# → 报告自动生成到工作区 storage/reports/（Windows 用 pwsh -File run_case.ps1 -Case "com.zui.calendar/172.py"）
+# → 报告自动生成到工作区 storage/reports/（Windows 用 pwsh -File scripts/run_case.ps1 -Case "com.zui.calendar/172.py"）
 
 # 3. 写自己的用例（参考 cases/com.zui.calendar/ 示例）
 #    新建 cases/<包名>/<编号>.py，用框架 API 表达步骤+断言，然后 run_case.py 执行
@@ -35,11 +35,14 @@ bash setup.sh
 ## 目录结构
 
 ```
-android-gui-testing/
+android-test-skills/
 ├── SKILL.md          # 给 AI 的玩法说明书（Agent 操作契约）
 ├── README.md         # 本文件（人类快速开始）
-├── setup.sh / setup.ps1        # 一键环境安装（macOS/Linux / Windows）
-├── run_case.ps1 / webui.*      # Windows 执行器 / Web 测试台
+├── scripts/
+│   ├── setup.sh / setup.ps1        # 一键环境安装（macOS/Linux / Windows）
+│   ├── run_case.ps1 / webui.*      # Windows 执行器 / Web 测试台
+│   ├── export.sh                   # 导出分发包
+│   └── sync_skill.ps1              # skill 包 ↔ 工作区双向同步
 ├── framework/
 │   ├── test_framework.py   # 测试框架（元素/OCR/视觉/看门狗/报告）
 │   ├── run_case.py         # 用例执行器（退出码反映最终结论）
@@ -59,6 +62,16 @@ android-gui-testing/
 ├── cases/            # 用例（按被测 App 包名分目录，如 cases/com.zui.calendar/172.py）
 └── tests/            # framework 纯逻辑单测（无需设备）
 ```
+
+## 架构：skill 包 vs 工作区
+
+- **skill 包**（`~/.agents/skills/android-test-skills`，Agent 管理，只读）：
+  framework/、docs/、tests/、evals/、scripts/、SKILL.md
+- **工作区**（`~/android-test-skills-data`，用户数据，读写）：
+  `.venv/`、`cases/`（副本）、`knowledge/`（副本）、`storage/`、`test_records.db`
+
+首次 `setup` 时 cases/ 和 knowledge/ 从 skill 包复制到工作区，
+之后用户的修改只动工作区副本，不再自动同步。
 
 ## 写用例模板
 
@@ -110,7 +123,7 @@ AI 会自动写进知识卡 / 生成用例脚本。
 
 - 电脑：Windows / macOS / Linux + Python 3.10+ + Android SDK platform-tools (adb)
 - 设备：Android 手机/平板，开启 USB 调试并授权
-- 可选：Python 3.13 + AutoGLM 云端模型（`setup.sh --with-agent`）
+- 可选：Python 3.13 + AutoGLM 云端模型（`scripts/setup.sh --with-agent`）
 
 ## 跑单测
 

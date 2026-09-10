@@ -1,10 +1,10 @@
 ﻿#!/usr/bin/env pwsh
-# android-gui-testing skill 一键环境安装（Windows 版）
+# android-test-skills skill 一键环境安装（Windows 版）
 #
 # 用法:
 #   pwsh -File setup.ps1
 #   pwsh -File setup.ps1 -WithAgent                       # 额外装 AutoGLM agent 环境
-#   pwsh -File setup.ps1 -Workspace D:\dsh-android-test   # 指定工作区
+#   pwsh -File setup.ps1 -Workspace D:\android-test-skills-data   # 指定工作区
 #   pwsh -File setup.ps1 -Python "C:\Program Files\python\3.11\python.exe"
 #   pwsh -File setup.ps1 -SkipDeviceCheck                 # 没插设备时装依赖
 #   pwsh -File setup.ps1 -Recreate                        # 重建已存在的 venv
@@ -16,7 +16,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$Workspace = (Join-Path $HOME 'dsh-android-test'),
+    [string]$Workspace = (Join-Path $HOME 'android-test-skills-data'),
     [string]$Python = $env:PYTHON,
     [switch]$WithAgent,
     [switch]$SkipDeviceCheck,
@@ -27,7 +27,7 @@ param(
 $ErrorActionPreference = 'Stop'
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 
-$SkillDir = $PSScriptRoot
+$SkillDir = Split-Path -Parent $PSScriptRoot
 $VenvDir  = Join-Path $Workspace '.venv'
 $VenvPy   = Join-Path $VenvDir 'Scripts\python.exe'
 
@@ -214,17 +214,31 @@ if ($SkipDeviceCheck) {
     }
 }
 
-# ------------------------------------------------------ 5. 建工作区数据目录
-Write-Step '5/5 建工作区数据目录...'
+# ------------------------------------------------------ 5. 建工作区数据目录 + 首次复制 cases/knowledge
+Write-Step '5/5 初始化工作区...'
 New-Item -ItemType Directory -Path $Workspace -Force | Out-Null
-# 代码（framework/）、用例（cases/）、知识卡（knowledge/）一律留在 skill 包 —— 那是 Agent
-# 实际加载的地方，也是唯一权威。工作区只放运行产物：换了 Agent 也能共享，重装 skill 不会丢。
-# 不要再往工作区复制 framework/：run_case.ps1 优先用 skill 包那份，复制过去只会多一份
-# 需要维护的副本（还会触发 run_case.py 的副本比对告警）。
-foreach ($dir in @('storage', 'storage\reports', 'storage\screenshots')) {
+# 运行产物
+foreach ($dir in @('storage', 'storage\reports', 'storage\screenshots', 'storage\logs')) {
     $dst = Join-Path $Workspace $dir
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
     Write-Ok "$dir -> $dst"
+}
+# 首次复制 cases/ + knowledge/（仅工作区不存在时复制，后续修改只动工作区）
+$casesSrc = Join-Path $SkillDir 'cases'
+$casesDst = Join-Path $Workspace 'cases'
+if (-not (Test-Path -LiteralPath $casesDst)) {
+    Copy-Item -LiteralPath $casesSrc -Destination $casesDst -Recurse -Force
+    Write-Ok "首次复制 cases/ → $casesDst"
+} else {
+    Write-Info "cases/ 已存在，跳过（后续修改只动工作区副本）"
+}
+$kbSrc = Join-Path $SkillDir 'knowledge'
+$kbDst = Join-Path $Workspace 'knowledge'
+if (-not (Test-Path -LiteralPath $kbDst)) {
+    Copy-Item -LiteralPath $kbSrc -Destination $kbDst -Recurse -Force
+    Write-Ok "首次复制 knowledge/ → $kbDst"
+} else {
+    Write-Info "knowledge/ 已存在，跳过"
 }
 
 # ------------------------------------------------- 可选: AutoGLM agent 环境
@@ -272,14 +286,14 @@ Write-Host '══════════════════════�
 Write-Host '✅ 安装完成！快速开始:' -ForegroundColor Green
 Write-Host ''
 Write-Host "  # 跑示例用例（用例按包名分目录：cases\<包名>\<编号>.py）" -ForegroundColor DarkGray
-Write-Host "  pwsh -File `"$SkillDir\run_case.ps1`" -Case `"com.zui.calendar/172.py`""
+Write-Host "  pwsh -File `"$SkillDir\scripts\run_case.ps1`" -Case `"com.zui.calendar/172.py`""
 Write-Host ''
 Write-Host "  # 等价的原生写法（注意 cd 到 skill 包，不是工作区）"
 Write-Host "  cd `"$SkillDir\framework`""
 Write-Host "  & `"$VenvPy`" run_case.py `"com.zui.calendar/172.py`""
 Write-Host ''
 Write-Host "  # 启动 Web 测试台 (http://127.0.0.1:8900)"
-Write-Host "  pwsh -File `"$SkillDir\webui.ps1`" start"
+Write-Host "  pwsh -File `"$SkillDir\scripts\webui.ps1`" start"
 Write-Host ''
 Write-Host "  工作区: $Workspace" -ForegroundColor DarkGray
 Write-Host "  报告输出: $Workspace\storage\reports\" -ForegroundColor DarkGray

@@ -161,8 +161,8 @@ def main():
         print(f"⚠️ [db] 套件记录初始化失败（不影响执行）: {e}")
         db = None
         report_dir = os.path.join(
-            os.environ.get("DSH_ANDROID_TEST_DIR",
-                           os.path.join(os.path.expanduser("~"), "dsh-android-test")),
+            os.environ.get("DSH_WORKSPACE_DIR",
+                           os.path.join(os.path.expanduser("~"), "android-test-skills-data")),
             "storage", "reports")
 
     # ── 逐用例执行 ────────────────────────────────────────────────────

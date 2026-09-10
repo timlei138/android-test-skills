@@ -19,15 +19,34 @@
       <div><div class="brand-title">Android 测试台</div><div class="brand-sub">Test Lab</div></div>
     </div>
     <nav>
-      <button id="nav-records" class="active" onclick="show('records')"><span class="nav-icon">◈</span><span>测试记录</span></button>
+      <button id="nav-dashboard" class="active" onclick="show('dashboard')"><span class="nav-icon">◐</span><span>Dashboard</span></button>
+      <button id="nav-records" onclick="show('records')"><span class="nav-icon">◈</span><span>测试记录</span></button>
       <button id="nav-scripts" onclick="show('scripts')"><span class="nav-icon">▤</span><span>Case</span></button>
       <button id="nav-knowledge" onclick="show('knowledge')"><span class="nav-icon">◉</span><span>知识库</span></button>
       <button id="nav-vision" onclick="show('vision')"><span class="nav-icon">👁</span><span>视觉模型</span></button>
     </nav>
-    <div class="side-footer">SQLite · Markdown</div>
+    <div class="side-footer">version<br><span id="version-info" style="opacity:.7">…</span></div>
   </aside>
 
-  <main id="view-records">
+  <main id="view-dashboard">
+    <div class="page-header">
+      <div><h2>Dashboard</h2><p>测试通过率总览</p></div>
+      <button class="theme-toggle" onclick="toggleTheme()">🌙 暗色</button>
+    </div>
+    <div class="dash-stats" id="dash-stats"></div>
+    <div class="dash-grid">
+      <div class="dash-card">
+        <div class="dash-card-title">Flaky 用例 Top 10</div>
+        <div class="dash-card-body" id="dash-flaky"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="dash-card">
+        <div class="dash-card-title">按类别通过率</div>
+        <div class="dash-card-body" id="dash-category"><div class="empty">加载中…</div></div>
+      </div>
+    </div>
+  </main>
+
+  <main id="view-records" style="display:none">
     <div class="page-header">
       <div>
         <h2>测试记录</h2>
@@ -63,7 +82,6 @@
             <th>用例名</th>
             <th>测试类别</th>
             <th>状态</th>
-            <th style="width:80px">通过率</th>
             <th style="width:140px">开始时间</th>
             <th>总耗时</th>
             <th>Case 输入</th>
@@ -224,7 +242,10 @@
 
 <div class="lightbox" id="lightbox" onclick="closeLightbox()">
   <div class="lightbox-close">×</div>
-  <img id="lightbox-img" src="" alt="">
+  <div class="lb-nav lb-prev" id="lb-prev" onclick="event.stopPropagation();lbPrev()">‹</div>
+  <img id="lightbox-img" src="" alt="" onclick="event.stopPropagation()">
+  <div class="lb-nav lb-next" id="lb-next" onclick="event.stopPropagation();lbNext()">›</div>
+  <div class="lb-counter" id="lb-counter"></div>
 </div>
 
 <!-- 耗时操作等待框（删除记录/脚本等）：showBusy() 显示、hideBusy() 关闭，z-index 高于详情面板 -->

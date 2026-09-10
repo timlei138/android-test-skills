@@ -4,8 +4,8 @@
 零依赖（标准库 sqlite3）。
 
 数据库位置（按优先级）：
-  1. 环境变量 DSH_ANDROID_TEST_DIR（测试工作区根，其下 storage/test_records.db）
-  2. 默认 ~/dsh-android-test/storage/test_records.db
+  1. 环境变量 DSH_WORKSPACE_DIR（测试工作区根，其下 storage/test_records.db）
+  2. 默认 ~/android-test-skills-data/storage/test_records.db
 
 显式定位而非相对路径推导：本模块可能在 skill 包或工作区任意位置被加载，
 只有显式路径才能保证读的是同一个库。
@@ -19,11 +19,11 @@ from datetime import datetime
 
 
 def default_test_dir() -> str:
-    """测试工作区根目录：环境变量 > 默认 ~/dsh-android-test。"""
-    env = os.environ.get("DSH_ANDROID_TEST_DIR")
+    """测试工作区根目录：环境变量 > 默认 ~/android-test-skills-data。"""
+    env = os.environ.get("DSH_WORKSPACE_DIR")
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
-    return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+    return os.path.join(os.path.expanduser("~"), "android-test-skills-data")
 
 
 # ── 容错删除 ────────────────────────────────────────────────────────

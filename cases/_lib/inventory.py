@@ -15,7 +15,7 @@
   python cases/_lib/inventory.py com.zui.calendar verify 175_设置页 \
       --rids tv_lesson_duration --texts 课程时间设置 --re '^第\\d+节$'
 
-存储位置：环境变量 DSH_ANDROID_TEST_DIR 指向工作区根，或默认 ~/dsh-android-test。
+存储位置：环境变量 DSH_WORKSPACE_DIR 指向工作区根，或默认 ~/android-test-skills-data。
 本工具不 import uiautomator2/test_framework，任何 Python 环境可跑。
 """
 import argparse
@@ -26,10 +26,10 @@ import sys
 
 # ── 存储定位：与 framework 同源（db.default_test_dir 逻辑），此处不依赖 db ──
 def workspace_dir():
-    env = os.environ.get("DSH_ANDROID_TEST_DIR")
+    env = os.environ.get("DSH_WORKSPACE_DIR")
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
-    return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+    return os.path.join(os.path.expanduser("~"), "android-test-skills-data")
 
 
 PROBE_ROOT = os.path.join(workspace_dir(), "storage", "probes")

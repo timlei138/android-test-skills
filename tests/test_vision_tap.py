@@ -26,7 +26,7 @@ if FW_DIR not in sys.path:
 # 测试隔离：工作区指向临时目录（vision.json 不存在 → 用户未配置态）。
 # 必须在 import vision 之前设置——VISION_CONF_FILE 是模块级常量。
 _WORKSPACE = tempfile.mkdtemp(prefix="dsh_vision_test_")
-os.environ["DSH_ANDROID_TEST_DIR"] = _WORKSPACE
+os.environ["DSH_WORKSPACE_DIR"] = _WORKSPACE
 
 try:
     from PIL import Image

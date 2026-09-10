@@ -17,22 +17,23 @@ Windows 脚本参数：
 
 Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理两项 Windows 特有问题：
 原生命令 stderr 日志不触发 `NativeCommandError` 中断、强制 `PYTHONUTF8=1` 避免 GBK 编码 emoji 崩溃。
-默认工作区 `~/dsh-android-test`（Windows 下为 `C:\Users\<你>\dsh-android-test`）。
+默认工作区 `~/android-test-skills-data`（Windows 下为 `C:\Users\<你>\android-test-skills-data`）。
 
 ## 测试记录查询（SQLite）
 
-- 每次执行自动入库 `~/dsh-android-test/storage/test_records.db`：用例（cases）/步骤（steps）/断言结果（results，含状态快照与证据路径）。
+- 每次执行自动入库 `~/android-test-skills-data/storage/test_records.db`：用例（cases）/步骤（steps）/断言结果（results，含状态快照与证据路径）。
 - 命令行查看：`framework/db.py`（`python -c "import sys; sys.path.insert(0,'framework'); from db import get_db; print(get_db().list_cases())"`）
 
 ## Web 前端（查看记录 + 编辑知识库，随 skill 打包分发）
 
-- **位置**：本 skill 包内（`webui.sh` 在包根目录，`framework/webui.py` + `framework/webui.html`）
-- **启动**：`./webui.sh` → 打开 http://127.0.0.1:8900（`stop`/`status`/指定端口）
+- **位置**：本 skill 包内（`scripts/webui.sh`，实现为 `framework/webui.py` + `framework/webui.html`）
+- **启动**：`./scripts/webui.sh` → 打开 http://127.0.0.1:8900（`stop`/`status`/指定端口）
 - **数据定位**（显式，不依赖脚本所在目录）：
-  - 环境变量 `DSH_ANDROID_TEST_DIR` 指定测试工作区（其下 `storage/` 含 test_records.db + 截图/报告）
-- 用例与知识卡单一数据源在 **skill 包** `cases/` 与 `knowledge/`，同步 skill 即获得全部；可用 `DSH_ANDROID_TEST_CASES` / `DSH_KNOWLEDGE_DIR` 覆盖
-  - 默认 `~/dsh-android-test/`；知识库另可用 `DSH_KNOWLEDGE_DIR` 覆盖
-  - 打包给别人：对方装好 skill 后跑 `setup.sh` 建工作区，直接 `./webui.sh` 即可
+  - 环境变量 `DSH_WORKSPACE_DIR` 指定测试工作区（其下 `storage/` 含 test_records.db + 截图/报告）
+- 用例与知识卡的**编辑目标在工作区副本**（setup 时从 skill 包复制而来）；
+  可用 `DSH_WORKSPACE_CASES` / `DSH_KNOWLEDGE_DIR` 覆盖目录
+  - 未跑过 setup 时兜底命中 skill 包的 `cases/` 与 `knowledge/`
+  - 打包给别人：对方装好 skill 后跑 `scripts/setup.sh` 建工作区，直接 `./scripts/webui.sh` 即可
 - **测试记录**页：用例列表（通过/失败徽章、搜索、筛选）→ 详情含 用户输入/脚本/状态/证据
 - **知识库**页：CodeMirror 编辑器查看/编辑 `knowledge/*.md`（高亮、行号、括号匹配），文件名白名单防路径穿越
   - `_template.md` **只读**（新建卡的样式源）；`_system.md` **禁删但可编辑补充**
@@ -40,29 +41,29 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 
 ## 代码与数据分开放（skill 包 / 工作区）
 
-**代码改 skill 包，数据留工作区** —— 两边各一份、各司其职，中间不再需要同步：
+**代码在 skill 包（只读），编辑目标在工作区** —— 两边各司其职：
 
 | | 放哪 | 为什么 |
 |---|---|---|
-| **代码** `framework/` + 根目录脚本 + `SKILL.md` | skill 包（唯一） | Agent 加载的就是这里，改完直接生效 |
-| **资产** `cases/` + `knowledge/` | skill 包（唯一），git 兜底 | 版本历史比本地副本有用 |
-| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 跨 Agent 共享、重装 skill 不会被清空 |
+| **代码** `framework/` + `scripts/` + `docs/` + `SKILL.md` | skill 包（唯一，只读） | Agent 加载的就是这里；升级/重装 skill 包不碰用户数据 |
+| **可编辑资产** `cases/` + `knowledge/` | 工作区（唯一编辑目标，setup 时从 skill 包复制） | 用户的用例与知识积累留在自己地盘；跨 Agent 会话共享 |
+| **数据** `storage/`（截图/报告/探查缓存/测试库）+ `.venv/` | 工作区（唯一） | 重装 skill 不会被清空 |
 
-**为什么数据不跟着进 skill 包**（看着更"单副本"，实际三个坑）：
+**为什么资产放工作区而不是直接改 skill 包**（三个坑）：
 
 1. **跨 Agent 会分裂**。机器上可能同时存在多个 Agent 的 skill 目录（`~/.workbuddy/skills/`、
-   `~/.agents/skills/` …），数据放进去就是每个 Agent 一份数据库，报告对不上。
-   工作区按 `~/dsh-android-test` 定位，所有 Agent 打开的是同一个。
-2. **重装会连数据一起没**。分开放时重装 skill 只丢代码（git 里有），数据能活下来。
-3. **不污染 git**。skill 包是要入库的仓库，截图动辄上百 MB，进去了仓库就废了。
+   `~/.agents/skills/` …），资产放 skill 包里就是每个 Agent 一份，改了这份那份看不到。
+   工作区按 `~/android-test-skills-data` 定位，所有 Agent 打开的是同一个。
+2. **重装/升级会覆盖手改**。skill 包是要入库随版本分发的，用户对用例/知识卡的修改
+   混进去就会被下次升级冲掉；分开放则升级只换代码。
+3. **不污染 git**。skill 包是入库仓库，用户数据（含 DB、潜在的大截图）混入会拖垮仓库。
 
-**代码唯一权威是 skill 包**：`run_case.ps1` 的搜索顺序是 skill 包在前、工作区兜底。
-反过来排会导致「改了 skill 包、跑用例却命中工作区旧副本」的静默失效，**别改回去**。
-（连带效应：`run_case.py` 把自身所在目录插到 `sys.path[0]`，选中哪份 `run_case.py`，
-整套框架和 `cases/` 都跟着那份走，不是只影响一个文件。）
+**工作区副本是唯一编辑目标**：`run_case.py` / `webui.py` 的搜索顺序是工作区在前、
+skill 包兜底（未跑过 setup 时兜底命中）。改用例/知识卡一律改工作区那份——
+改 skill 包里的原始副本不会生效，**别改回去**。
 
-`scripts/sync_skill.ps1` 现在的用途只剩一个：补/刷新工作区那份备份副本。
-**日常改代码不需要跑它。** 脚本会跳过内容相同的文件，并校验所有 `.ps1` 带 UTF-8 BOM
+`scripts/sync_skill.ps1` 的用途：skill 包 ↔ 工作区双向搬运（如框架改动分发、
+工作区新用例/知识卡回收集）。脚本会跳过内容相同的文件，并校验所有 `.ps1` 带 UTF-8 BOM
 （PowerShell 5.1 缺 BOM 会按 GBK 解析报错）。
 
 ## Web UI 排障
@@ -164,4 +165,4 @@ db.backfill_package()               # 正式写库（幂等，已有值的不动
 - 保存位置：**工作区** `storage/vision.json`（权限 600）。**不进 skill 包**，`sync_skill.ps1` 不同步 `storage/`，所以分享 skill 包不会泄露密钥
 - API Key 只回显掩码（前 4 后 4，中间打码），GET 接口不返回明文；**保存时留空 = 保留原值**（防止只想改 model 却误清空密钥）
 - 运行时优先级：`DEEPSEEK_API_KEY` 环境变量 > 本页配置 > `~/.dsh/.credentials.yaml`
-- 跨平台：路径统一由 `db.default_test_dir()` 解析（Windows `~/dsh-android-test`、Linux/macOS 同逻辑），无平台分支代码
+- 跨平台：路径统一由 `db.default_test_dir()` 解析（Windows `~/android-test-skills-data`、Linux/macOS 同逻辑），无平台分支代码

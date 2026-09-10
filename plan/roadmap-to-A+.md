@@ -1,4 +1,4 @@
-# android-gui-testing 质量进阶计划：A- → A+（实现版）
+# android-test-skills 质量进阶计划：A- → A+（实现版）
 
 > 来源：2026-09-09 全量代码评审（三轮核销后基线 = A-，全部严重/中等问题已清零）。
 > 本文档含实现细节与验收标准，可直接拆成任务执行。
@@ -284,7 +284,7 @@
          - run: python evals/lint_case.py cases/ --baseline # 2.1 落地后启用
    ```
 3. `export.sh` 打包时把 VERSION 写进归档名：
-   `android-gui-testing-1.0.0.tar.gz`。
+   `android-test-skills-1.0.0.tar.gz`。
 4. 语义化版本约定写进 OPS.md：框架行为变更 = minor，规则/契约变更 = major，
    文档/知识卡 = patch。
 5. **CI 设备约束（显式声明，评审结论⑥）**：CI runner 无 Android 设备，

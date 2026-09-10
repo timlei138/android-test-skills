@@ -23,37 +23,40 @@ from run_case import extract_user_input_from_source  # noqa: E402
 
 
 def _skill_dir() -> str:
-    """skill 包根目录（framework 的上一层）。
-    用例与知识卡归属 skill 包，随版本同步；工作区只存运行产物。
-    """
+    """skill 包根目录（framework 的上一层）。"""
     return os.path.dirname(HERE)
 
 
-def resolve_cases_dir() -> str:
-    """用例脚本目录：单一数据源 = <skill包>/cases。
-    环境变量 DSH_ANDROID_TEST_CASES 可覆盖（多工作区场景）。
-    """
-    env = os.environ.get("DSH_ANDROID_TEST_CASES")
-    if env and env.strip():
-        return os.path.abspath(os.path.expanduser(env.strip()))
-    return os.path.join(_skill_dir(), "cases")
-
-
-CASES_DIR = resolve_cases_dir()
-
-
-# ── 视觉模型配置 ──────────────────────────────────────────────────
-# 凭据存「工作区」而非 skill 包：skill 包是要分享给团队的，
-# 绝不能把 apikey 打进分享包（sync_skill.ps1 也不同步 storage/）。
+# ── 工作区路径解析 ─────────────────────────────────────────────────
+# 凭据/数据存「工作区」而非 skill 包：skill 包是要分享给团队的，
+# 绝不能把 apikey / db 打进分享包（sync_skill.ps1 也不同步 storage/）。
 # 工作区路径解析复用 db.default_test_dir()，保证 Windows/Linux/macOS 一致。
 def _workspace_dir() -> str:
-    env = os.environ.get("DSH_ANDROID_TEST_DIR")
+    env = os.environ.get("DSH_WORKSPACE_DIR")
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
     try:
         return default_test_dir()
     except Exception:
-        return os.path.join(os.path.expanduser("~"), "dsh-android-test")
+        return os.path.join(os.path.expanduser("~"), "android-test-skills-data")
+
+
+def resolve_cases_dir() -> str:
+    """用例脚本目录：工作区优先（用户修改只动工作区副本）。
+    环境变量 DSH_WORKSPACE_CASES 可覆盖（多工作区场景）。
+    """
+    env = os.environ.get("DSH_WORKSPACE_CASES")
+    if env and env.strip():
+        return os.path.abspath(os.path.expanduser(env.strip()))
+    # 工作区 cases/（setup 时首次复制，后续只动工作区）
+    ws_cases = os.path.join(_workspace_dir(), "cases")
+    if os.path.isdir(ws_cases):
+        return ws_cases
+    # 兜底：skill 包 cases/（未跑过 setup 时）
+    return os.path.join(_skill_dir(), "cases")
+
+
+CASES_DIR = resolve_cases_dir()
 
 
 def _vision_conf_path() -> str:
@@ -397,19 +400,33 @@ def _validate_md(text: str):
 PAGE = None
 
 def resolve_knowledge_dir() -> str:
-    """知识库目录：单一数据源 = <skill包>/knowledge。
+    """知识库目录：工作区优先（用户修改只动工作区副本）。
     环境变量 DSH_KNOWLEDGE_DIR 可覆盖。
-    不再从工作区查找 —— 工作区只存运行产物，避免两处副本分叉。
     """
     env = os.environ.get("DSH_KNOWLEDGE_DIR")
     if env and env.strip():
         return os.path.abspath(os.path.expanduser(env.strip()))
+    # 工作区 knowledge/
+    ws_kb = os.path.join(_workspace_dir(), "knowledge")
+    if os.path.isdir(ws_kb):
+        return ws_kb
+    # 兜底：skill 包 knowledge/
     return os.path.join(_skill_dir(), "knowledge")
 
 
 KNOWLEDGE_DIR = resolve_knowledge_dir()
 
-PAGE = None
+
+def _get_version() -> str:
+    """读取 framework/VERSION 文件。缓存在进程内，只读一次。"""
+    if hasattr(_get_version, "_cached"):
+        return _get_version._cached
+    try:
+        with open(os.path.join(HERE, "VERSION"), encoding="utf-8") as f:
+            _get_version._cached = f.read().strip() or "unknown"
+    except OSError:
+        _get_version._cached = "unknown"
+    return _get_version._cached
 
 def _load_page():
     """Lazy-load the HTML template (kept in webui.html to avoid JS escaping issues)."""
@@ -524,6 +541,43 @@ class Handler(BaseHTTPRequestHandler):
             self._json(db.list_cases(100))
         elif path == "/api/flaky":
             self._json(db.flaky_stats())
+        elif path == "/api/dashboard":
+            # Dashboard 汇总：统计卡 + flaky Top N + 按类别聚合
+            all_stats = db.flaky_stats(min_runs=2)
+            cases = db.list_cases(limit=500)
+            total = len(cases)
+            pass_n = sum(1 for c in cases if c["status"] == "PASS")
+            fail_n = sum(1 for c in cases if c["status"] == "FAIL")
+            pass_rate = (pass_n / total) if total else 0.0
+            flaky_list = [s for s in all_stats if s["flaky"]]
+            # flaky 按通过率距 0.5 越近越“flaky”排序
+            flaky_list.sort(key=lambda s: abs(s["pass_rate"] - 0.5))
+            flaky_top = flaky_list[:10]
+            # 按类别（用例名 _ 前缀）聚合
+            cat_map = {}
+            for c in cases:
+                name = (c.get("name") or "").replace(".py", "")
+                idx = name.find("_")
+                cat = name[:idx] if idx > 0 else (name or "未知")
+                if cat not in cat_map:
+                    cat_map[cat] = {"runs": 0, "pass": 0}
+                cat_map[cat]["runs"] += 1
+                if c["status"] == "PASS":
+                    cat_map[cat]["pass"] += 1
+            by_cat = sorted(
+                [{"category": k, "runs": v["runs"],
+                  "pass_rate": round(v["pass"] / v["runs"], 4) if v["runs"] else 0.0}
+                 for k, v in cat_map.items()],
+                key=lambda x: -x["runs"])
+            self._json({
+                "summary": {
+                    "total": total, "pass": pass_n, "fail": fail_n,
+                    "pass_rate": round(pass_rate, 4),
+                    "flaky_count": len(flaky_list),
+                },
+                "flaky_top": flaky_top,
+                "by_category": by_cat,
+            })
         elif path == "/api/card-freshness":
             # 知识卡新鲜度：每包最近 PASS 时间与执行统计
             # 前端可据此标记过期卡片（超 N 天未验证）
@@ -553,6 +607,9 @@ class Handler(BaseHTTPRequestHandler):
                     os.environ.get("DEEPSEEK_API_KEY")
                     or _load_vision_conf()["api_key"]),
             })
+        elif path == "/api/version":
+            # 版本号：前端侧栏底部常驻，快速确认是否为最新版本
+            self._json({"version": _get_version()})
         elif path.startswith("/api/cases/"):
             # /api/cases/<id>/history → 同 script_path 的历史序列
             if path.endswith("/history"):

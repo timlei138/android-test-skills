@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # Android 测试台 Web 界面 一键启动/停止（skill 包版）
-# 本脚本位于 skill 包根目录，webui.py 在同目录 framework/ 下；
-# 数据（SQLite/知识库）固定在工作区 DSH_ANDROID_TEST_DIR（默认 ~/dsh-android-test）。
+# 本脚本位于 scripts/，SKILL_DIR 指向上一层（skill 包根）；
+# 数据（SQLite/知识库）固定在工作区 DSH_WORKSPACE_DIR（默认 ~/android-test-skills-data）。
 # 用法:
 #   ./webui.sh         启动（默认 8900 端口）
 #   ./webui.sh 9000    指定端口启动
 #   ./webui.sh stop    停止
 #   ./webui.sh status  查看状态
 set -e
-SKILL_DIR="$(cd "$(dirname "$0")" && pwd)"
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 FRAMEWORK="$SKILL_DIR/framework"
 WEBUI="$FRAMEWORK/webui.py"
 
-# 测试工作区：环境变量 > 默认 ~/dsh-android-test
-TEST_DIR="${DSH_ANDROID_TEST_DIR:-$HOME/dsh-android-test}"
+# 测试工作区：环境变量 > 默认 ~/android-test-skills-data
+TEST_DIR="${DSH_WORKSPACE_DIR:-$HOME/android-test-skills-data}"
 # venv：工作区 .venv > 默认
-VENV="${DSH_ANDROID_TEST_VENV:-$TEST_DIR/.venv}"
+VENV="${DSH_WORKSPACE_VENV:-$TEST_DIR/.venv}"
 PYTHON="$VENV/bin/python"
 
 PORT="${2:-8900}"
@@ -38,7 +38,7 @@ case "${1:-start}" in
       exit 0
     fi
     # 显式指定数据目录与 skill 包位置，保证从任何位置启动都读写同一份资产
-    DSH_ANDROID_TEST_DIR="$TEST_DIR" DSH_SKILL_DIR="$SKILL_DIR" \
+    DSH_WORKSPACE_DIR="$TEST_DIR" DSH_SKILL_DIR="$SKILL_DIR" \
     nohup "$PYTHON" "$WEBUI" --port "$PORT" --host "$HOST" >"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1.5
