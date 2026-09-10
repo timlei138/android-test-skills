@@ -89,6 +89,13 @@ def _mask(s: str) -> str:
     return s[:4] + "*" * (len(s) - 8) + s[-4:]
 
 
+def _is_loopback(host: str) -> bool:
+    """判定 host 是否为回环地址（127.0.0.1 / localhost / ::1）。
+    非回环 = 局域网可访问 = 需要警告（Web UI 无认证机制）。
+    """
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def _save_vision_conf(base_url, model, api_key, tap_strategy="") -> tuple:
     """保存配置。api_key 为空时保留原值（避免用户只想改 model 却清空密钥）。
     tap_strategy 非法值归一为 auto（运行时 resolve_strategy 也会兑底）。"""
@@ -515,6 +522,22 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": "static asset missing"}, 404)
         elif path == "/api/cases":
             self._json(db.list_cases(100))
+        elif path == "/api/flaky":
+            self._json(db.flaky_stats())
+        elif path == "/api/card-freshness":
+            # 知识卡新鲜度：每包最近 PASS 时间与执行统计
+            # 前端可据此标记过期卡片（超 N 天未验证）
+            from urllib.parse import urlparse as _urlparse, parse_qs as _parse_qs
+            qs = _parse_qs(_urlparse(self.path).query or "")
+            days = int(qs.get("days", ["30"])[0])
+            from datetime import datetime as _dt, timedelta
+            cutoff = (_dt.now() - timedelta(days=days)).isoformat(timespec="seconds")
+            rows = db.card_freshness()
+            for r in rows:
+                r["stale"] = (
+                    not r["last_pass_at"] or r["last_pass_at"] < cutoff
+                )
+            self._json(rows)
         elif path == "/api/vision":
             # 视觉模型配置（凭据存工作区，apikey 脱敏回显）
             conf = _load_vision_conf()
@@ -531,6 +554,20 @@ class Handler(BaseHTTPRequestHandler):
                     or _load_vision_conf()["api_key"]),
             })
         elif path.startswith("/api/cases/"):
+            # /api/cases/<id>/history → 同 script_path 的历史序列
+            if path.endswith("/history"):
+                parts = path.rsplit("/", 2)  # [..., id, 'history']
+                try:
+                    cid = int(parts[-2])
+                except (ValueError, IndexError):
+                    self._json({"error": "bad id"}, 400)
+                    return
+                case = db.get_case(cid)
+                if not case or not case.get("script_path"):
+                    self._json([])
+                    return
+                self._json(db.case_history(case["script_path"]))
+                return
             cid = int(path.rsplit("/", 1)[-1])
             case = db.get_case(cid)
             if case is None:
@@ -848,6 +885,13 @@ def main():
     ap.add_argument("--port", type=int, default=8900)
     ap.add_argument("--host", default="127.0.0.1")
     args = ap.parse_args()
+    # 非回环地址警告：Web UI 无认证机制，暴露到不可信网络 = 裸奔
+    if not _is_loopback(args.host):
+        print("⚠️" * 8)
+        print("⚠️  Web UI 绑定到非回环地址，局域网内任何人可：")
+        print("⚠️  删除测试记录 / 查看并修改知识卡 / 保存视觉模型 API Key")
+        print("⚠️  确认这是你的意图。无认证机制，切勿暴露到不可信网络。")
+        print("⚠️" * 8)
     print(f"📊 测试台: http://{args.host}:{args.port}")
     print(f"   记录库: {get_db().path}")
     print(f"   知识库: {KNOWLEDGE_DIR}")

@@ -111,3 +111,14 @@ AI 会自动写进知识卡 / 生成用例脚本。
 - 电脑：Windows / macOS / Linux + Python 3.10+ + Android SDK platform-tools (adb)
 - 设备：Android 手机/平板，开启 USB 调试并授权
 - 可选：Python 3.13 + AutoGLM 云端模型（`setup.sh --with-agent`）
+
+## 跑单测
+
+```bash
+# macOS / Linux
+python -m unittest discover -s tests -v
+
+# Windows PowerShell（解决中文乱码）
+$env:PYTHONUTF8="1"
+python -m unittest discover -s tests -v
+```

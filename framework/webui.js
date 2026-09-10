@@ -3,7 +3,7 @@
 // 依赖：/codemirror.bundle.js 必须先于本文件加载（暴露 window.CodeMirrorYaml，历史命名）。
 
 const $ = s => document.querySelector(s);
-let cases = [], filter = '', kbCurrent = null, kbFiles = [], currentCaseId = null;
+let cases = [], flakyMap = {}, filter = '', kbCurrent = null, kbFiles = [], currentCaseId = null;
 // 统一请求封装：错误提示必须能看懂。
 // 1) 后端返回的 {"error": "..."} 只取 error 字段，不再把整坨 JSON 甩给用户；
 // 2) 连接被掐断时 fetch 只会抛一句 "Failed to fetch"，换成指向明确的提示。
@@ -86,8 +86,16 @@ function showBusy(text) {
 function hideBusy() { const b = $('#busy'); if (b) b.style.display = 'none'; }
 
 async function loadCases() {
-  try { cases = await api('/api/cases'); updateStats(); renderCases(); }
-  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="8" class="empty">加载失败: '+e.message+'</td></tr>'; }
+  try {
+    cases = await api('/api/cases');
+    try {
+      const flaky = await api('/api/flaky');
+      flakyMap = {};
+      flaky.forEach(f => { flakyMap[f.script_path] = f; });
+    } catch(e) { flakyMap = {}; }
+    updateStats(); renderCases();
+  }
+  catch(e) { $('#case-list').innerHTML = '<tr><td colspan="9" class="empty">加载失败: '+e.message+'</td></tr>'; }
 }
 function updateStats() {
   const pass = cases.filter(c => c.status==='PASS').length;
@@ -103,6 +111,18 @@ function setFilter(f) {
     if (el) el.className = 'filter-btn' + ((f||'all')===k ? ' active' : '');
   });
   renderCases();
+}
+// 通过率单元格：从 flakyMap 查找该脚本的统计，无数据时显示“-”
+function rateCell(c) {
+  // script_path 可能是绝对路径，flakyMap 键也是绝对路径，直接匹配
+  const sp = c.script_path;
+  if (!sp) return '-';
+  const f = flakyMap[sp];
+  if (!f || f.runs < 2) return '<span style="color:var(--text-3)">-</span>';
+  const pct = Math.round(f.pass_rate * 100);
+  const color = f.flaky ? 'var(--fail)' : (pct >= 80 ? 'var(--pass)' : 'var(--warn)');
+  const tag = f.flaky ? ' 🔀' : '';
+  return '<span style="color:'+color+'" title="'+f.runs+' 次执行，通过率 '+pct+'%">' + pct + '%' + tag + '</span>';
 }
 function renderCases() {
   const q = ($('#case-search').value||'').toLowerCase();
@@ -124,6 +144,7 @@ function renderCases() {
       '<td><b>'+escapeHtml(c.name)+'</b></td>' +
       '<td>'+category(c.name)+'</td>' +
       '<td>'+badge(c.status)+'</td>' +
+      '<td class="mono" style="font-size:11px">' + rateCell(c) + '</td>' +
       '<td class="mono" style="font-size:11px;color:var(--text-3)">'+fmtDateTime(c.started_at)+'</td>' +
       '<td class="mono">'+dur+'</td>' +
       '<td><div class="truncate" title="'+input+'">'+input+'</div></td>' +
@@ -275,6 +296,25 @@ async function openCase(id) {
   }
   html += '</div>';
 
+  // ── 历史时间线（同 script_path 的近 20 次执行）──
+  if (c.script_path) {
+    try {
+      const hist = await api('/api/cases/' + id + '/history');
+      if (hist && hist.length > 1) {
+        html += '<div class="detail-meta" style="margin-top:12px">';
+        html += '<div class="row"><span class="label">📊 历史执行（近 '+hist.length+' 次）</span></div>';
+        html += '<div class="hist-timeline">';
+        const statusColor = {PASS:'var(--pass)',WARN:'var(--warn)',FAIL:'var(--fail)',BLOCKED:'var(--blocked)',ERROR:'var(--fail)'};
+        for (const h of hist) {
+          const col = statusColor[h.final_status] || 'var(--text-3)';
+          const dur = h.duration_seconds ? h.duration_seconds.toFixed(1)+'s' : '';
+          html += '<div class="hist-block" style="background:'+col+'" title="#'+h.id+' '+h.final_status+' '+dur+' '+(h.started_at||'')+'"></div>';
+        }
+        html += '</div></div>';
+      }
+    } catch(e) { /* 历史加载失败不阻断详情展示 */ }
+  }
+
   $('#detail-body').innerHTML = html;
   $('#detail-overlay').classList.add('open');
   $('#detail-panel').classList.add('open');
@@ -411,9 +451,12 @@ function newScript() {
 }
 
 // ── 知识库 ──
+let kbFreshness = null;  // card-freshness 缓存
 async function loadKnowledgeList() {
   try {
     kbFiles = await api('/api/knowledge');
+    // 拉取卡片新鲜度（容错：API 不可用时不影响列表展示）
+    try { kbFreshness = await api('/api/card-freshness?days=30'); } catch(_) { kbFreshness = null; }
     const el = $('#kb-files'); el.innerHTML = '';
     kbFiles.forEach(item => {
       const name = item.name, prot = item.protected;
@@ -436,6 +479,25 @@ async function loadKnowledgeList() {
         del.title = '删除该知识卡';
         del.onclick = (e) => { e.stopPropagation(); deleteKnowledge(name); };
         b.appendChild(del);
+      }
+      // 知识卡新鲜度徽章（匹配 App 卡包名）
+      if (kbFreshness) {
+        const pkg = name.replace(/\.md$/, '');
+        const fresh = kbFreshness.find(r => r.package === pkg);
+        if (fresh) {
+          const badge = document.createElement('span');
+          badge.className = 'kb-tag';
+          if (fresh.stale) {
+            badge.textContent = '⚠ 未验证';
+            badge.title = '该卡 30 天内无 PASS 记录，建议跑一遍用例验证';
+            badge.style.color = '#c66';
+          } else {
+            const d = fresh.last_pass_at ? fresh.last_pass_at.slice(0, 10) : '?';
+            badge.textContent = '✓ ' + d;
+            badge.title = '最近验证时间: ' + (fresh.last_pass_at || '无');
+          }
+          b.appendChild(badge);
+        }
       }
       row.appendChild(b);
       el.appendChild(row);

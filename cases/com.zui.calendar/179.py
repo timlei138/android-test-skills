@@ -176,11 +176,11 @@ def run():
     if not goto_手动创建课程表(t):
         t.record("FAIL", "未进入手动创建页")
         return t.finish()
-    time.sleep(2)
+    time.sleep(2)  # 等手动创建页渲染
     if not t.tap_rid(TIME_SETTINGS_RID, silent=True):
         t.record("FAIL", "未找到课程时间设置入口")
         return t.finish()
-    time.sleep(2.5)
+    time.sleep(2.5)  # 等 TimeSlotSettings 页渲染
     t.observe_dialogs(rounds=3)
     act = t.current_activity()
     t.record("PASS" if "TimeSlotSettings" in act else "FAIL",
@@ -191,7 +191,7 @@ def run():
     if not open_section_editor(t, 0):
         t.record("FAIL", "未找到上午第1节编辑 arrow")
         return t.finish()
-    time.sleep(0.8)
+    time.sleep(0.8)  # 等弹窗动画完成
     row_y, step, cols = calibrate_picker(t)
     if not cols or len(cols) < 4:
         t.record("FAIL", f"时间滚轮 OCR 标定失败（cols={cols}）")
@@ -208,16 +208,16 @@ def run():
     if not t.tap_text("确定", wait=3, silent=True):
         t.record("FAIL", "第1节确定未生效")
         return t.finish()
-    time.sleep(2)
+    time.sleep(2)  # 等同步动画完成
     # 自动调整 dialog
     t.tap_text("确定", wait=3, silent=True)
-    time.sleep(2)
+    time.sleep(2)  # 等自动调整弹窗关闭
     t.observe_dialogs(rounds=3)
 
     # ── Step2：验证上午后续小节同步、每节课时长仍 50 ──
     t.step("Step2 验证上午同步与课时长 50 分钟不变")
     t.observe_dialogs(rounds=3)
-    time.sleep(1.0)
+    time.sleep(1.0)  # 等对话框动画稳定
     # 课时长元素在页顶，必须在滚动收集前读取（滚动后会离屏）
     lesson = (t.read_rid("com.zui.calendar:id/tv_lesson_duration") or {}).get("text", "")
     t.record("PASS" if lesson and "50" in lesson else "FAIL",
@@ -237,16 +237,16 @@ def run():
     t.screenshot("179_改后设置页")
     # Step3 需要操作上午第4节 arrow，先滚回顶部确保它可见
     scroll_to_top(t)
-    time.sleep(0.6)
+    time.sleep(0.6)  # 等滚动动画完成
 
     # ── Step3：上午第4节 改结束小时到 14（>下午开始 14:00 → 冲突）──
     t.step("Step3 上午最后小节结束 > 下午开始 → 触发冲突")
     if not open_section_editor(t, 3):                # 第4节（0-based idx=3）
         t.record("FAIL", "未找到上午第4节编辑 arrow")
         return t.finish()
-    time.sleep(1.0)
+    time.sleep(1.0)  # 等编辑弹窗动画
     t.observe_dialogs(rounds=3)
-    time.sleep(0.6)
+    time.sleep(0.6)  # 等弹窗稳定
     row_y3, step3, cols3 = calibrate_picker(t)
     if not cols3 or len(cols3) < 4:
         t.record("FAIL", f"时间滚轮 OCR 标定失败（cols={cols3}）")
@@ -260,11 +260,11 @@ def run():
     if not t.tap_text("确定", wait=3, silent=True):
         t.record("FAIL", "第4节确定未生效")
         return t.finish()
-    time.sleep(2)
+    time.sleep(2)  # 等冲突提示响应
     t.observe_dialogs(rounds=3)
     # 改后续小节也可能触发"是否自动调整其他课程"对话框 → 关掉它
     t.tap_text("确定", wait=3, silent=True)
-    time.sleep(2)
+    time.sleep(2)  # 等自动调整弹窗关闭
     t.observe_dialogs(rounds=3)
     t.screenshot("179_冲突设置页")
 
@@ -272,7 +272,7 @@ def run():
     t.step("Step4 点完成 → 期望 toast 提示时间冲突")
     try:
         t.observe_dialogs(rounds=3)
-        time.sleep(1.0)
+        time.sleep(1.0)  # 等 toast 窗口稳定
         # 实测（probe v2/v3/AB 隔离实验）：save_view bounds 中心 (1777,202) 点击无反应，
         # +61,+31 偏移点 (1788,197) 稳定触发 toast —— 热区偏移，偏移量从 bounds 推导；
         # observe=False 必须带：默认点击链的弹窗检查窗口(~1.5s)+截图会占满 toast 的 ~2s 窗口

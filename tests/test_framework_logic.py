@@ -33,6 +33,15 @@ import states    # noqa: E402
 import vision    # noqa: E402
 import webui     # noqa: E402
 
+# scripts/ 目录加入 sys.path 以便导入预算门禁脚本
+_SCRIPTS = os.path.join(_ROOT, "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+import check_context_budget as budget_mod  # noqa: E402
+
+# framework/smoke.py 加入 sys.path 以便测试 _check_adb
+import smoke  # noqa: E402
+
 try:
     import test_framework as tf
 except ImportError:  # 系统 Python 无 uiautomator2 时跳过相关用例
@@ -770,6 +779,721 @@ class TestRequireTapSingleImpl(unittest.TestCase):
                 mock.patch.object(tf, "ACTION_DELAY", 0):
             self.assertIs(t.require_tap_text("确定", wait=1), True)
         self.assertEqual(t._cur_step["results"], [])   # 命中：零记录零噪声
+
+
+# ── states.py：环境漂移检测 ─────────────────────────────────────
+class TestEnvSnapshot(unittest.TestCase):
+    """env_snapshot() 取设备环境快照，env_diff() 比对差异。"""
+
+    def _mk_states(self, values):
+        """造一个假 States，adb.shell 按命令返回预设值。"""
+        s = states.States.__new__(states.States)
+
+        class FakeAdb:
+            def shell(self_, *args):
+                cmd = " ".join(args)
+                for key, val in values.items():
+                    if key in cmd:
+                        return val
+                return ""
+
+        s.adb = FakeAdb()
+        return s
+
+    def test_snapshot_returns_all_keys(self):
+        s = self._mk_states({
+            "accelerometer_rotation": "0",
+            "user_rotation": "0",
+            "stay_on_while_plugged_in": "3",
+            "zen_mode": "0",
+        })
+        snap = s.env_snapshot()
+        self.assertEqual(snap["accelerometer_rotation"], "0")
+        self.assertEqual(snap["user_rotation"], "0")
+        self.assertEqual(snap["stay_on_while_plugged_in"], "3")
+        self.assertEqual(snap["zen_mode"], "0")
+        # foreground_package 和 screen_brightness 已移除（误报源）
+        self.assertNotIn("foreground_package", snap)
+        self.assertNotIn("screen_brightness", snap)
+
+    def test_diff_no_change(self):
+        s = self._mk_states({
+            "accelerometer_rotation": "0",
+            "user_rotation": "0",
+            "stay_on_while_plugged_in": "3",
+            "zen_mode": "0",
+        })
+        baseline = s.env_snapshot()
+        diff = s.env_diff(baseline)
+        self.assertEqual(diff, {})
+
+    def test_diff_detects_change(self):
+        before = {"accelerometer_rotation": "0", "user_rotation": "0",
+                  "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        # 用例跑了之后 zen_mode 变成了 1（勿扰）
+        s = self._mk_states({
+            "accelerometer_rotation": "0",
+            "user_rotation": "0",
+            "stay_on_while_plugged_in": "3",
+            "zen_mode": "1",
+        })
+        diff = s.env_diff(before)
+        self.assertIn("zen_mode", diff)
+        self.assertEqual(diff["zen_mode"], ("0", "1"))
+        self.assertNotIn("accelerometer_rotation", diff)
+
+    def test_diff_ignore_keys(self):
+        before = {"accelerometer_rotation": "0", "user_rotation": "0",
+                  "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        # 用例改了 user_rotation（合法操作），但豁免
+        s = self._mk_states({
+            "accelerometer_rotation": "0",
+            "user_rotation": "1",
+            "stay_on_while_plugged_in": "3",
+            "zen_mode": "0",
+        })
+        diff = s.env_diff(before, ignore=("user_rotation",))
+        self.assertEqual(diff, {})
+        # 不豁免则能检测到
+        diff2 = s.env_diff(before)
+        self.assertIn("user_rotation", diff2)
+
+    def test_diff_multiple_changes(self):
+        before = {"accelerometer_rotation": "0", "user_rotation": "0",
+                  "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        s = self._mk_states({
+            "accelerometer_rotation": "1",
+            "user_rotation": "3",
+            "stay_on_while_plugged_in": "3",
+            "zen_mode": "2",
+        })
+        diff = s.env_diff(before)
+        self.assertEqual(len(diff), 3)   # 除了 stay_on_while_plugged_in
+
+
+# ── test_framework.py：finish() 环境漂移检测集成 ────────────────
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestEnvDriftInFinish(unittest.TestCase):
+    """finish() 前环境漂移检测：有漂移 → PASS 降级为 WARN；env_ignore 豁免。"""
+
+    def _mk(self, env_baseline, env_after, env_ignore=()):
+        t = object.__new__(tf.TestCase)
+        t.name = "单测_漂移检测"
+        t.device_info = "fake"
+        t.case_dir = tempfile.mkdtemp()
+        t._case_start_time = time.time()
+        t._dump_count = 0
+        t._db = None
+        t._db_case_id = None
+        t._fatal_error = None
+        t._env_ignore = set(env_ignore)
+        t._env_baseline = env_baseline
+        t.steps = [{"name": "s", "results":
+                    [{"result": "PASS", "detail": "ok"}],
+                    "evidences": []}]
+        # mock states
+        s = states.States.__new__(states.States)
+
+        class FakeAdb:
+            def shell(self_, *args):
+                cmd = " ".join(args)
+                for key, val in env_after.items():
+                    if key in cmd:
+                        return val
+                return ""
+
+        s.adb = FakeAdb()
+        t.states = s
+        return t
+
+    def test_no_drift_stays_pass(self):
+        baseline = {"accelerometer_rotation": "0", "user_rotation": "0",
+                    "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        t = self._mk(baseline, dict(baseline))
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "PASS")
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_drift_downgrades_to_warn(self):
+        baseline = {"accelerometer_rotation": "0", "user_rotation": "0",
+                    "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        after = dict(baseline)
+        after["zen_mode"] = "1"   # 用例开了勿扰没关
+        t = self._mk(baseline, after)
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "WARN")
+            # 报告里应有漂移信息
+            warn_records = [r for s in t.steps for r in s["results"]
+                           if r["result"] == "WARN"]
+            self.assertTrue(any("污染设备环境" in r["detail"]
+                               for r in warn_records))
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_env_ignore_prevents_drift_warn(self):
+        baseline = {"accelerometer_rotation": "0", "user_rotation": "0",
+                    "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        after = dict(baseline)
+        after["user_rotation"] = "1"   # 合法操作（横屏用例）
+        t = self._mk(baseline, after, env_ignore=("user_rotation",))
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "PASS")
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_drift_skipped_on_error(self):
+        """ERROR 状态不做漂移检测（用例没跑完，环境不可信）。"""
+        baseline = {"accelerometer_rotation": "0", "user_rotation": "0",
+                    "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        after = dict(baseline)
+        after["zen_mode"] = "1"
+        t = self._mk(baseline, after)
+        t._fatal_error = RuntimeError("模拟异常")
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "ERROR")
+            # ERROR 路径不应添加漂移 WARN 记录
+            warn_records = [r for s in t.steps for r in s["results"]
+                           if r["result"] == "WARN" and "污染" in r["detail"]]
+            self.assertEqual(len(warn_records), 0)
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_fail_not_downgraded_by_drift(self):
+        """FAIL 不被漂移检测覆盖（漂移只影响 PASS 用例）。"""
+        baseline = {"accelerometer_rotation": "0", "user_rotation": "0",
+                    "stay_on_while_plugged_in": "3", "zen_mode": "0"}
+        after = dict(baseline)
+        after["zen_mode"] = "1"
+        t = self._mk(baseline, after)
+        # 覆盖步骤为 FAIL
+        t.steps = [{"name": "s", "results":
+                    [{"result": "FAIL", "detail": "断言失败"}],
+                    "evidences": []}]
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                t.finish()
+            self.assertEqual(t.final_status, "FAIL")
+        finally:
+            tf.LAST_CASE = old_last
+
+
+# ── scripts/check_context_budget.py：上下文预算门禁 ────────────
+class TestContextBudget(unittest.TestCase):
+    """临时目录造超限/达标文件，验证 check() 返回值。"""
+
+    def _setup_root(self, files):
+        """files: {rel_path: line_count}"""
+        td = tempfile.TemporaryDirectory()
+        for rel, count in files.items():
+            fp = os.path.join(td.name, rel.replace("/", os.sep))
+            os.makedirs(os.path.dirname(fp), exist_ok=True)
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write("\n".join([f"line {i}" for i in range(count)]))
+        return td
+
+    def test_over_limit_returns_error(self):
+        """超限文件 → errors 非空。"""
+        td = self._setup_root({"SKILL.md": 300})
+        old = budget_mod.BUDGETS
+        budget_mod.BUDGETS = [("SKILL.md", 100)]
+        try:
+            errors, warnings, _ = budget_mod.check(td.name)
+            self.assertEqual(len(errors), 1)
+            self.assertIn("超限", errors[0])
+        finally:
+            budget_mod.BUDGETS = old
+        td.cleanup()
+
+    def test_within_limit_no_error(self):
+        """达标文件 → errors 为空。"""
+        td = self._setup_root({"SKILL.md": 50})
+        old = budget_mod.BUDGETS
+        budget_mod.BUDGETS = [("SKILL.md", 100)]
+        try:
+            errors, warnings, _ = budget_mod.check(td.name)
+            self.assertEqual(len(errors), 0)
+        finally:
+            budget_mod.BUDGETS = old
+        td.cleanup()
+
+    def test_warn_at_80_percent(self):
+        """达 80% 预算 → warnings 非空但 errors 为空。"""
+        td = self._setup_root({"SKILL.md": 85})
+        old = budget_mod.BUDGETS
+        budget_mod.BUDGETS = [("SKILL.md", 100)]
+        try:
+            errors, warnings, _ = budget_mod.check(td.name)
+            self.assertEqual(len(errors), 0)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("接近", warnings[0])
+        finally:
+            budget_mod.BUDGETS = old
+        td.cleanup()
+
+    def test_glob_pattern(self):
+        """glob 模式匹配多个文件。"""
+        td = self._setup_root({
+            "knowledge/a.md": 30,
+            "knowledge/b.md": 500,
+        })
+        old = budget_mod.BUDGETS
+        budget_mod.BUDGETS = [("knowledge/*.md", 400)]
+        try:
+            errors, warnings, _ = budget_mod.check(td.name)
+            self.assertEqual(len(errors), 1)   # b.md 超限
+            self.assertIn("b.md", errors[0])
+        finally:
+            budget_mod.BUDGETS = old
+        td.cleanup()
+
+    def test_missing_file_ignored(self):
+        """预算规则中的文件不存在 → 不报错。"""
+        td = tempfile.TemporaryDirectory()
+        old = budget_mod.BUDGETS
+        budget_mod.BUDGETS = [("nonexistent.md", 100)]
+        try:
+            errors, warnings, _ = budget_mod.check(td.name)
+            self.assertEqual(errors, [])
+        finally:
+            budget_mod.BUDGETS = old
+        td.cleanup()
+
+    def test_token_estimate(self):
+        """token 估算：中文 + 英文混合。"""
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as f:
+            f.write("这是中文测试 hello world test")
+            path = f.name
+        try:
+            tok = budget_mod._token_estimate(path)
+            # 6 中文 + 4 英文词 = 6 + 4*1.3 ≈ 11
+            self.assertGreater(tok, 5)
+            self.assertLess(tok, 20)
+        finally:
+            os.unlink(path)
+
+
+# ── 3.2 VERSION + drift ─────────────────────────────────────────────────
+class TestVersionInDrift(unittest.TestCase):
+    """VERSION 纳入 _DRIFT_KEY_FILES，版本不一致时触发漂移告警。"""
+
+    def test_version_in_drift_keys(self):
+        self.assertIn("VERSION", run_case._DRIFT_KEY_FILES)
+
+    def test_version_file_exists(self):
+        """framework/VERSION 文件存在且内容合法（语义化版本 x.y.z）。"""
+        ver_path = os.path.join(_ROOT, "framework", "VERSION")
+        self.assertTrue(os.path.isfile(ver_path))
+        with open(ver_path, encoding="utf-8") as f:
+            ver = f.read().strip()
+        # 简单语义化版本校验
+        self.assertRegex(ver, r"^\d+\.\d+\.\d+")
+
+
+# ── 3.4 _is_loopback ──────────────────────────────────────────────────
+class TestIsLoopback(unittest.TestCase):
+    def test_loopback_addresses(self):
+        for addr in ("127.0.0.1", "localhost", "::1"):
+            self.assertTrue(webui._is_loopback(addr), addr)
+
+    def test_non_loopback_addresses(self):
+        for addr in ("0.0.0.0", "192.168.1.1", "10.0.0.5", ""):
+            self.assertFalse(webui._is_loopback(addr), addr)
+
+
+# ── 3.3 smoke._check_adb ────────────────────────────────────────────────
+class TestSmokeCheckAdb(unittest.TestCase):
+    """smoke._check_adb() 的 mock 测试（不依赖真实设备）。"""
+
+    def test_adb_not_found(self):
+        """adb 不在 PATH → 返回 False + 引导文案。"""
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError):
+            ok, msg = smoke._check_adb()
+        self.assertFalse(ok)
+        self.assertIn("adb", msg)
+
+    def test_no_device(self):
+        """adb 在但无设备 → 返回 False。"""
+        mock_result = mock.Mock()
+        mock_result.stdout = "List of devices attached\n\n"
+        with mock.patch("subprocess.run", return_value=mock_result):
+            ok, msg = smoke._check_adb()
+        self.assertFalse(ok)
+        self.assertIn("设备", msg)
+
+    def test_device_found(self):
+        """有授权设备 → 返回 True。"""
+        mock_result = mock.Mock()
+        mock_result.stdout = "List of devices attached\nABCDEF123\tdevice\n"
+        with mock.patch("subprocess.run", return_value=mock_result):
+            ok, msg = smoke._check_adb()
+        self.assertTrue(ok)
+        self.assertIn("ABCDEF123", msg)
+
+
+# ── 阶段四：record() RESULT_TYPES 枚举 ──────────────────────────
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestRecordResultTypes(unittest.TestCase):
+    """record() 非标准结果类型抛 ValueError（拼写错误在开发期即暴露）。"""
+
+    def _mk(self):
+        t = object.__new__(tf.TestCase)
+        t._cur_step = None
+        t.steps = []
+        t._db = None
+        t._db_step_id = None
+        t._db_step_ord = 0
+        t._wd_enabled = False
+        t._shot_idx = 0
+        t.case_dir = tempfile.mkdtemp()
+        return t
+
+    def test_valid_types_no_error(self):
+        """标准结果类型不抛异常。"""
+        for rt in ("PASS", "FAIL", "WARN", "INFO", "BLOCKED"):
+            t = self._mk()
+            with contextlib.redirect_stdout(io.StringIO()):
+                t.record(rt, f"test {rt}")   # 不应抛
+
+    def test_invalid_type_raises(self):
+        """拼写错误 → ValueError。"""
+        t = self._mk()
+        with self.assertRaises(ValueError) as cm:
+            t.record("PASSS", "typo")
+        self.assertIn("PASSS", str(cm.exception))
+
+    def test_lowercase_raises(self):
+        """小写也不行。"""
+        t = self._mk()
+        with self.assertRaises(ValueError):
+            t.record("pass", "lowercase")
+
+
+# ── 阶段四：finish() 报告文件名清洗 ──────────────────────────
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestFinishSafeName(unittest.TestCase):
+    """用例名含文件系统非法字符时，finish() 报告文件名用 re.sub 清洗。"""
+
+    def _mk(self):
+        t = object.__new__(tf.TestCase)
+        t.steps = [{"name": "s1", "results": [{"result": "PASS", "detail": "ok",
+                     "state": None, "evidence": None}], "evidences": [], "actions": []}]
+        t._cur_step = t.steps[0]
+        t._db = None
+        t._db_case_id = None
+        t._fatal_error = None
+        t._env_baseline = None
+        t._env_ignore = ()
+        t._case_start_time = time.time()
+        t._dump_count = 0
+        t._finished = False
+        t._report_path = None
+        t.device_info = "fake"
+        t.case_dir = tempfile.mkdtemp()
+        t.script_path = ""
+        t.states = None
+        return t
+
+    def test_colon_in_name(self):
+        """用例名含 : → 替换为 _，报告正常生成。"""
+        t = self._mk()
+        t.name = "用例:带冒号"
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()) as rd:
+                path = t.finish()
+            self.assertNotIn(":", os.path.basename(path))
+            self.assertTrue(os.path.isfile(path))
+        finally:
+            tf.LAST_CASE = old_last
+
+    def test_slash_in_name(self):
+        """用例名含 / → 替换为 _。"""
+        t = self._mk()
+        t.name = "用例/带斜杠"
+        old_last = tf.LAST_CASE
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(tf, "REPORT_DIR", tempfile.mkdtemp()):
+                path = t.finish()
+            self.assertNotIn("/", os.path.basename(path).replace("_报告.md", ""))
+            self.assertTrue(os.path.isfile(path))
+        finally:
+            tf.LAST_CASE = old_last
+
+
+# ── 阶段四：already_finished 分支（run_case.py L288-301）─────────
+class TestAlreadyFinishedBranch(unittest.TestCase):
+    """用例正常 finish 后收尾代码再抛异常时，退出码沿用 final_status 映射而非 3。"""
+
+    def test_exit_code_uses_final_status(self):
+        """already_finished=True 时 exit_code_for(final_status) 而非 3。"""
+        # PASS 用例的 already_finished 分支应返回 0
+        self.assertEqual(run_case.exit_code_for("PASS"), 0)
+        self.assertEqual(run_case.exit_code_for("WARN"), 0)
+        # FAIL 用例应返回 1
+        self.assertEqual(run_case.exit_code_for("FAIL"), 1)
+
+    def test_already_finished_logic_in_run_case(self):
+        """模拟 run_case.py 的 already_finished 判定逻辑。"""
+        # 模拟：tc._finished = True, final_status = "PASS"
+        class FakeTC:
+            _finished = True
+            final_status = "PASS"
+        tc = FakeTC()
+        already_finished = bool(tc is not None and getattr(tc, "_finished", False))
+        self.assertTrue(already_finished)
+        code = run_case.exit_code_for(getattr(tc, "final_status", None))
+        self.assertEqual(code, 0)   # PASS → 0，不是 3
+
+
+# ── 阶段四：VISION_CONF_FILE 惰性求值 ──────────────────────────
+class TestVisionConfLazyEval(unittest.TestCase):
+    """import vision 后改环境变量，_vision_conf_path() 应反映新路径。"""
+
+    def test_lazy_eval_after_env_change(self):
+        old = os.environ.get("DSH_ANDROID_TEST_DIR")
+        try:
+            os.environ["DSH_ANDROID_TEST_DIR"] = "/tmp/test_ws_1"
+            p1 = vision._vision_conf_path()
+            self.assertIn("test_ws_1", p1)
+
+            os.environ["DSH_ANDROID_TEST_DIR"] = "/tmp/test_ws_2"
+            p2 = vision._vision_conf_path()
+            self.assertIn("test_ws_2", p2)
+            self.assertNotEqual(p1, p2)
+        finally:
+            if old is None:
+                os.environ.pop("DSH_ANDROID_TEST_DIR", None)
+            else:
+                os.environ["DSH_ANDROID_TEST_DIR"] = old
+
+
+# ── 阶段四：学习词表 (mtime, words) 缓存 ──────────────────────
+@unittest.skipIf(tf is None, "需要 uiautomator2（用工作区 venv 跑本测试）")
+class TestDialogWordsCache(unittest.TestCase):
+    """\u005f_load_learned_words 带 (mtime, words) 缓存，文件未变时不重读。"""
+
+    def test_cache_hit_same_mtime(self):
+        """同一文件连续两次调用，只读一次磁盘。"""
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "dialog_words.json")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump({"guide": ["ok1"], "allow": [], "deny": []}, f)
+            # 指到临时文件
+            old_file = tf.LEARNED_WORDS_FILE
+            old_cache = tf._dialog_words_cache.copy()
+            tf.LEARNED_WORDS_FILE = fp
+            tf._dialog_words_cache = {"mtime": None, "words": None}
+            try:
+                t = object.__new__(tf.TestCase)
+                w1 = t._load_learned_words()
+                self.assertEqual(w1["guide"], ["ok1"])
+                # 缓存已填充
+                self.assertIsNotNone(tf._dialog_words_cache["mtime"])
+                # 第二次调用应从缓存返回
+                w2 = t._load_learned_words()
+                self.assertEqual(w2["guide"], ["ok1"])
+            finally:
+                tf.LEARNED_WORDS_FILE = old_file
+                tf._dialog_words_cache = old_cache
+
+    def test_cache_invalidate_on_file_change(self):
+        """文件 mtime 变化后缓存失效，重新读取。"""
+        with tempfile.TemporaryDirectory() as td:
+            fp = os.path.join(td, "dialog_words.json")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump({"guide": ["old"], "allow": [], "deny": []}, f)
+            old_file = tf.LEARNED_WORDS_FILE
+            old_cache = tf._dialog_words_cache.copy()
+            tf.LEARNED_WORDS_FILE = fp
+            tf._dialog_words_cache = {"mtime": None, "words": None}
+            try:
+                t = object.__new__(tf.TestCase)
+                w1 = t._load_learned_words()
+                self.assertEqual(w1["guide"], ["old"])
+                # 改文件
+                time.sleep(0.05)  # 确保 mtime 变化
+                with open(fp, "w", encoding="utf-8") as f:
+                    json.dump({"guide": ["new"], "allow": [], "deny": []}, f)
+                w2 = t._load_learned_words()
+                self.assertEqual(w2["guide"], ["new"])
+            finally:
+                tf.LEARNED_WORDS_FILE = old_file
+                tf._dialog_words_cache = old_cache
+
+
+# ── 阶段四：结构化日志 _setup_logging ─────────────────────────
+class TestSetupLogging(unittest.TestCase):
+    """run_case._setup_logging() 创建日志文件并写入日志。"""
+
+    def test_creates_log_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            ws = os.path.join(td, "ws")
+            os.makedirs(os.path.join(ws, "storage"))
+            old = os.environ.get("DSH_ANDROID_TEST_DIR")
+            os.environ["DSH_ANDROID_TEST_DIR"] = ws
+            try:
+                log_path = run_case._setup_logging()
+                self.assertTrue(os.path.isfile(log_path))
+                self.assertIn("run_", os.path.basename(log_path))
+                # 日志文件含至少一行日志
+                with open(log_path, encoding="utf-8") as f:
+                    content = f.read()
+                self.assertIn("日志文件", content)
+            finally:
+                if old is None:
+                    os.environ.pop("DSH_ANDROID_TEST_DIR", None)
+                else:
+                    os.environ["DSH_ANDROID_TEST_DIR"] = old
+                # 清理 logging handler 避免污染其它测试
+                import logging
+                for h in logging.getLogger().handlers[:]:
+                    if isinstance(h, logging.FileHandler):
+                        h.close()
+                        logging.getLogger().removeHandler(h)
+
+
+# ── db.py: list_cases 基本查询 ────────────────────────────
+class TestListCasesBasic(unittest.TestCase):
+    """list_cases 基本查询（迭代清理由 start_case mtime 检测处理）。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self._td.name, "test.db")
+        self.rec = db.RecordDB(self.db_path)
+
+    def tearDown(self):
+        self.rec.close()
+        self._td.cleanup()
+
+    def _insert(self, name, sp, status="PASS"):
+        cid = self.rec.start_case(name, device="test", script_path=sp)
+        self.rec.finish_case(cid, f"/tmp/{name}_报告.md", f"1 通过 / 0 失败",
+                             final_status=status)
+        return cid
+
+    def test_returns_all_records(self):
+        self._insert("app_1", "/cases/com.a/1.py", "FAIL")
+        self._insert("app_1", "/cases/com.a/1.py", "PASS")
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 2)
+
+    def test_no_script_path_kept(self):
+        self._insert("manual_1", None, "PASS")
+        self._insert("manual_2", None, "FAIL")
+        recs = self.rec.list_cases()
+        self.assertEqual(len(recs), 2)
+
+
+# ── db.py: 迭代清理（mtime 信号）──────────────────────────────
+class TestIterativeCleanup(unittest.TestCase):
+    """start_case() 基于脚本 mtime 自动清理迭代旧记录。"""
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory()
+        self.db_path = os.path.join(self._td.name, "test.db")
+        self.rec = db.RecordDB(self.db_path)
+        # 创建临时脚本文件（mtime 可控）
+        self.script = os.path.join(self._td.name, "test_case.py")
+        with open(self.script, "w") as f:
+            f.write("# v1\n")
+
+    def tearDown(self):
+        self.rec.close()
+        self._td.cleanup()
+
+    def _run(self, status="PASS", device="dev1"):
+        cid = self.rec.start_case("test", device=device, script_path=self.script)
+        self.rec.finish_case(cid, f"/tmp/test_{cid}_报告.md",
+                             "1 通过 / 0 失败", final_status=status)
+        return cid
+
+    def test_iterate_deletes_old(self):
+        """脚本被改过 → 旧记录是迭代 → 删除。"""
+        self._run("FAIL")          # 第 1 次
+        # 模拟 Agent 改脚本
+        time.sleep(1.1)  # 确保 mtime 差异（精度 1s）
+        with open(self.script, "w") as f:
+            f.write("# v2\n")
+        self._run("PASS")          # 第 2 次
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 1, "迭代后应只留 1 条")
+        self.assertEqual(all_recs[0]["status"], "PASS")
+
+    def test_no_change_keeps_old(self):
+        """脚本没改 → 有意复跑 → 保留。"""
+        self._run("PASS")          # 第 1 次
+        time.sleep(0.5)
+        self._run("PASS")          # 第 2 次，脚本没动
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 2, "脚本没改应保留全部")
+
+    def test_different_device_keeps(self):
+        """换设备 → 保留。"""
+        self._run("PASS", device="devA")
+        time.sleep(1.1)
+        with open(self.script, "w") as f:
+            f.write("# v2\n")
+        self._run("PASS", device="devB")
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 2, "换设备应保留")
+
+    def test_suite_id_keeps(self):
+        """套件记录 → 保留（suite_id 不为 NULL 不清理）。"""
+        cid1 = self.rec.start_case("test", device="dev1", script_path=self.script,
+                                   suite_id=42)
+        self.rec.finish_case(cid1, "/tmp/r.md", "1/0", final_status="FAIL")
+        time.sleep(1.1)
+        with open(self.script, "w") as f:
+            f.write("# v2\n")
+        cid2 = self.rec.start_case("test", device="dev1", script_path=self.script,
+                                   suite_id=43)
+        self.rec.finish_case(cid2, "/tmp/r.md", "1/0", final_status="PASS")
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 2, "套件记录应保留")
+
+    def test_script_missing_no_cleanup(self):
+        """脚本不存在 → 不清理（安全降级）。"""
+        fake = os.path.join(self._td.name, "nonexistent.py")
+        cid1 = self.rec.start_case("test", device="dev1", script_path=fake)
+        self.rec.finish_case(cid1, "/tmp/r.md", "1/0", final_status="FAIL")
+        cid2 = self.rec.start_case("test", device="dev1", script_path=fake)
+        self.rec.finish_case(cid2, "/tmp/r.md", "1/0", final_status="PASS")
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 2, "脚本不存在时不应清理")
+
+    def test_multiple_iterations_keep_only_latest(self):
+        """连续 5 次迭代，始终只留最新一条。"""
+        for i in range(5):
+            time.sleep(1.1)
+            with open(self.script, "w") as f:
+                f.write(f"# v{i+1}\n")
+            status = "FAIL" if i < 4 else "PASS"
+            self._run(status)
+        all_recs = self.rec.list_cases()
+        self.assertEqual(len(all_recs), 1)
+        self.assertEqual(all_recs[0]["status"], "PASS")
 
 
 if __name__ == "__main__":

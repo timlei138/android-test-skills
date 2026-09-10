@@ -19,6 +19,8 @@ param(
 
     [int]$Port = 8900,
 
+    [string]$Host = '127.0.0.1',
+
     [string]$Workspace = $(if ($env:DSH_ANDROID_TEST_DIR) { $env:DSH_ANDROID_TEST_DIR }
                            else { Join-Path $HOME 'dsh-android-test' })
 )
@@ -125,7 +127,7 @@ switch ($Action) {
         $env:PYTHONUTF8 = '1'
 
         $proc = Start-Process -FilePath $VenvPy `
-                              -ArgumentList @("`"$WebUI`"", '--port', $Port) `
+                              -ArgumentList @("`"$WebUI`"", '--port', $Port, '--host', $Host) `
                               -WorkingDirectory (Join-Path $SkillDir 'framework') `
                               -RedirectStandardOutput $LogFile `
                               -RedirectStandardError (Join-Path $SkillDir 'webui.err.log') `

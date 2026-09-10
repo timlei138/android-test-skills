@@ -45,6 +45,13 @@ PROBE_DIR = os.path.join(STORAGE_DIR, "probes")
 TRACE_DIR = os.path.join(STORAGE_DIR, "traces")
 ACTION_DELAY = 1.0   # 每次操作后的统一延时（防动画/时序竞态）
 
+# 断言结果类型枚举：record() 只接受这些值，拼写错误在开发期即抛错
+# （比 ❓ 兗底更早暴露；已审计存量 207 处调用全部为标准值，无兼容风险）
+RESULT_TYPES = ("PASS", "FAIL", "WARN", "INFO", "BLOCKED")
+
+# 学习词表缓存：(mtime, words_dict)，文件 mtime 未变时不重读
+_dialog_words_cache = {"mtime": None, "words": None}
+
 # 弹窗自动点击词表（u2 原生 watcher 注册用）
 DIALOG_GUIDE_WORDS = ("我知道了", "知道了", "立即开始", "开始使用")
 DIALOG_ALLOW_WORDS = ("允许", "同意", "始终允许", "仅在使用中允许",
@@ -320,7 +327,7 @@ def _is_probe_case(name):
 
 class TestCase:
     def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None,
-                 vision=None):
+                 vision=None, env_ignore=()):
         self.name = name
         # 未显式传入时，从环境变量取（run_case.py 注入：用户原始输入 + 脚本路径）
         self.user_input = user_input if user_input is not None \
@@ -328,6 +335,9 @@ class TestCase:
         self.script_path = script_path if script_path is not None \
             else os.environ.get("DSH_CASE_SCRIPT_PATH")
         # 设备绑定：整个用例生命周期内所有 adb/u2 操作锁定同一 serial
+        # 未显式传入时，从环境变量取（run_case.py --device 注入 / run_suite.py 透传）
+        if device_id is None:
+            device_id = os.environ.get("DSH_DEVICE_ID")
         self.serial = _resolve_serial(device_id)
         # 唤醒屏幕并解锁
         self._adb_run("shell", "input", "keyevent", "KEYCODE_WAKEUP", timeout=10)
@@ -401,9 +411,12 @@ class TestCase:
             try:
                 from db import get_db
                 self._db = get_db()
+                # 套件 runner 透传 suite_id（环境变量，无则单跑）
+                _suite_id = os.environ.get("DSH_SUITE_ID")
                 self._db_case_id = self._db.start_case(
                     self.name, self.device_info,
-                    user_input=self.user_input, script_path=self.script_path)
+                    user_input=self.user_input, script_path=self.script_path,
+                    suite_id=int(_suite_id) if _suite_id else None)
             except Exception as e:
                 # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
                 print(f"⚠️ [db] 用例入库失败（测试继续，但本次执行无记录）: {e}")
@@ -420,6 +433,17 @@ class TestCase:
         # finish() 时直接返回旧报告，不重复"备份旧报告+二次写库"
         self._finished = False
         self._report_path = None
+        # 环境漂移检测基线：__init__ 取初始快照，lock_portrait() 后刷新
+        # （lock_portrait 会改 accelerometer_rotation/user_rotation，
+        #  不刷新的话这两个键每次都报漂移，毫无意义）。
+        # finish() 前再取一次，与基线比对 → 非空记 WARN。
+        self._env_ignore = set(env_ignore) if env_ignore else set()
+        self._env_baseline = None
+        try:
+            if self.states:
+                self._env_baseline = self.states.env_snapshot()
+        except Exception:
+            pass   # 取基线失败不阻断用例
         # 探针用例：进程退出兜底清理（覆盖未正常调用 finish 的悬挂场景）
         if _is_probe_case(self.name):
             import atexit
@@ -577,12 +601,23 @@ class TestCase:
 
     # ── 弹窗自动点击（u2 原生 watcher，主流程驱动，零额外 dump）──────
     def _load_learned_words(self):
-        """读取 AI 学习词表（AI 处理过的未知弹窗按钮），返回 {category: [words]}"""
+        """读取 AI 学习词表（AI 处理过的未知弹窗按钮），返回 {category: [words]}。
+        带 (mtime, words) 缓存：文件未变时不重读磁盘（弹窗密集期每动作都调用，
+        减少 I/O 开销）。"""
+        global _dialog_words_cache
         _migrate_learned_words()  # 旧 framework/ 位置迁到工作区（幂等）
+        try:
+            mt = os.path.getmtime(LEARNED_WORDS_FILE)
+        except OSError:
+            return {"guide": [], "allow": [], "deny": []}
+        if _dialog_words_cache["mtime"] == mt and _dialog_words_cache["words"] is not None:
+            return {k: list(v) for k, v in _dialog_words_cache["words"].items()}
         try:
             import json
             with open(LEARNED_WORDS_FILE, encoding="utf-8") as f:
                 data = json.load(f)
+            _dialog_words_cache["mtime"] = mt
+            _dialog_words_cache["words"] = data
             return {k: list(v) for k, v in data.items()}
         except (OSError, ValueError):
             return {"guide": [], "allow": [], "deny": []}
@@ -807,6 +842,10 @@ class TestCase:
         - rid: 关联元素 resource-id，自动附 read_rid 状态（enabled/selected/checked/clickable）
         - evidence: 所有结果默认自动截图留证（验证点截图）
         """
+        if result not in RESULT_TYPES:
+            raise ValueError(
+                f"record() result 必须是 {RESULT_TYPES} 之一，收到 {result!r}"
+                "——拼写错误必须在此暴露，不能流进报告")
         # 兜底：调用方忘了开 step 时自动补一个可追溯的步骤，而不是崩在
         # "TypeError: 'NoneType' object is not subscriptable" —— 那个报错完全
         # 看不出根因是没调 t.step()，排查成本极高（175 用例踩过）。
@@ -1346,6 +1385,13 @@ class TestCase:
         self.adb_shell("settings", "put", "system", "accelerometer_rotation", "0")
         self.adb_shell("settings", "put", "system", "user_rotation", "0")
         time.sleep(0.5)
+        # 刷新漂移基线：lock_portrait 会改旋转设置，不刷新则这两个键
+        # 每次都报漂移。刷新后 finish() 只检测用例主体逻辑是否污染了环境。
+        try:
+            if self.states:
+                self._env_baseline = self.states.env_snapshot()
+        except Exception:
+            pass
 
     def snapshot_rotation(self):
         """记录当前旋转状态。需要中途转屏的用例：转屏前快照，finally 恢复。"""
@@ -1811,14 +1857,16 @@ class TestCase:
         if getattr(self, "_finished", False):
             return self._report_path
         os.makedirs(REPORT_DIR, exist_ok=True)
-        path = os.path.join(REPORT_DIR, f"{self.name}_报告.md")
+        # 报告文件名清洗：用例名含 :/\?* 等文件系统非法字符时不报错（与 _auto_screenshot 同款正则）
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", self.name)
+        path = os.path.join(REPORT_DIR, f"{safe_name}_报告.md")
         # 正式报告名始终反映最近一次运行（重跑覆盖是既定语义，DB 里另有全量历史）。
         # 但覆盖前把旧报告备份成带时间戳的副本，杜绝"同名用例互相覆盖导致结果丢失"。
         if os.path.exists(path):
             try:
                 import shutil
                 ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                bak = os.path.join(REPORT_DIR, f"{self.name}_{ts}_报告.md")
+                bak = os.path.join(REPORT_DIR, f"{safe_name}_{ts}_报告.md")
                 shutil.copyfile(path, bak)
                 print(f"[提示] 旧报告已备份为 {os.path.basename(bak)}", flush=True)
             except Exception as e:
@@ -1832,6 +1880,22 @@ class TestCase:
         # 用例没跑完，断言统计再好看也不可信 → 结论按 ERROR 压过一切。
         if self._fatal_error is not None:
             self.final_status = "ERROR"
+        # ── 环境漂移检测：用例是否污染了设备环境 ─────────────────
+        # 非 ERROR 时才检测（ERROR = 用例没跑完，环境状态不可信）。
+        # WARN 不覆盖 FAIL/ERROR，只在 PASS 时升级为 WARN。
+        if self._env_baseline and self.final_status not in ("ERROR",):
+            try:
+                diff = self.states.env_diff(self._env_baseline,
+                                            ignore=self._env_ignore)
+                if diff:
+                    parts = [f"{k}: {v[0]!r}→{v[1]!r}" for k, v in diff.items()]
+                    drift_msg = f"用例污染设备环境: {{{', '.join(parts)}}}"
+                    self.record("WARN", drift_msg)
+                    # PASS 用例因漂移降级为 WARN（不影响 CI 但提示维护者）
+                    if self.final_status == "PASS":
+                        self.final_status = "WARN"
+            except Exception:
+                pass   # 漂移检测失败不阻断报告生成
         LAST_CASE = self                 # run_case.py 取最终结论定退出码
         # 包名同时入库：报告文件可能丢，库里的记录不会丢，
         # 重建报告时才能原样还原「被测 App」这一栏。

@@ -19,6 +19,7 @@ VENV="${DSH_ANDROID_TEST_VENV:-$TEST_DIR/.venv}"
 PYTHON="$VENV/bin/python"
 
 PORT="${2:-8900}"
+HOST="${3:-127.0.0.1}"
 PIDFILE="$SKILL_DIR/.webui.pid"
 LOG="$SKILL_DIR/webui.log"
 
@@ -38,7 +39,7 @@ case "${1:-start}" in
     fi
     # 显式指定数据目录与 skill 包位置，保证从任何位置启动都读写同一份资产
     DSH_ANDROID_TEST_DIR="$TEST_DIR" DSH_SKILL_DIR="$SKILL_DIR" \
-    nohup "$PYTHON" "$WEBUI" --port "$PORT" >"$LOG" 2>&1 &
+    nohup "$PYTHON" "$WEBUI" --port "$PORT" --host "$HOST" >"$LOG" 2>&1 &
     echo $! > "$PIDFILE"
     sleep 1.5
     echo "✅ 已启动: http://127.0.0.1:${PORT}"

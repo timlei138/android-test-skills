@@ -1,0 +1,9 @@
+# 主依赖钉版本（从工作区 venv pip freeze 取基线）。
+# 升级流程：改此处版本号 → 真机回归一个用例（如 172.py）→ 提交。
+# 传递依赖（pyclip / logzero / progress 等）由 pip 自动解析，不显式钉版本。
+uiautomator2==3.7.0
+rapidocr-onnxruntime==1.2.3
+# ── 以下为 rapidocr / uiautomator2 的传递依赖，显式钉版本以防隐式升级 ──
+numpy==2.5.2
+onnxruntime==1.29.0
+pillow==12.3.0

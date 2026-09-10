@@ -20,7 +20,8 @@ param(
     [string]$Python = $env:PYTHON,
     [switch]$WithAgent,
     [switch]$SkipDeviceCheck,
-    [switch]$Recreate
+    [switch]$Recreate,
+    [switch]$Smoke
 )
 
 $ErrorActionPreference = 'Stop'
@@ -181,7 +182,8 @@ $r = Invoke-Native $VenvPy @('-m', 'pip', 'install', '--upgrade', 'pip', 'setupt
 $r.Output | Select-Object -Last 3 | ForEach-Object { Write-Info $_ }
 
 Write-Info '安装 uiautomator2 / rapidocr_onnxruntime（首次较慢，请耐心）...'
-$r = Invoke-Native $VenvPy @('-m', 'pip', 'install', 'uiautomator2', 'rapidocr_onnxruntime')
+$reqFile = Join-Path $SkillDir 'requirements.txt'
+$r = Invoke-Native $VenvPy @('-m', 'pip', 'install', '-r', $reqFile)
 $r.Output | Select-Object -Last 5 | ForEach-Object { Write-Info $_ }
 if (-not $r.Ok) {
     Write-Fail "依赖安装失败（退出码 $($r.ExitCode)），请检查网络或代理设置后重试"
@@ -281,4 +283,21 @@ Write-Host "  pwsh -File `"$SkillDir\webui.ps1`" start"
 Write-Host ''
 Write-Host "  工作区: $Workspace" -ForegroundColor DarkGray
 Write-Host "  报告输出: $Workspace\storage\reports\" -ForegroundColor DarkGray
+
+if ($Smoke) {
+    Write-Host ''
+    Write-Host "▶ 执行 smoke 探针..." -ForegroundColor Cyan
+    & $VenvPy (Join-Path $SkillDir 'framework\smoke.py')
+    $smokeCode = $LASTEXITCODE
+    if ($smokeCode -eq 0) {
+        Write-Ok 'smoke 全链路通畅'
+    } else {
+        Write-Warn "smoke 退出码 $smokeCode（设备/adb 问题，请检查连接）"
+    }
+} else {
+    Write-Host ''
+    Write-Host "  建议执行 smoke 探针验证全链路:" -ForegroundColor DarkGray
+    Write-Host "  & `"$VenvPy`" `"$SkillDir\framework\smoke.py`"" -ForegroundColor DarkGray
+}
+
 Write-Host '════════════════════════════════════════════' -ForegroundColor DarkCyan

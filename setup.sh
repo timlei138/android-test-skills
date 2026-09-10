@@ -34,8 +34,8 @@ echo "▶ 3/5 创建虚拟环境并安装依赖..."
 mkdir -p "$WORKSPACE"
 $PYTHON -m venv "$WORKSPACE/.venv" 2>/dev/null || { echo "  ❌ python3 venv 失败"; exit 1; }
 "$WORKSPACE/.venv/bin/pip" install -q --upgrade pip setuptools wheel
-"$WORKSPACE/.venv/bin/pip" install -q uiautomator2 rapidocr_onnxruntime \
-    || { echo "  ❌ 依赖安装失败（uiautomator2 / rapidocr_onnxruntime）"; exit 1; }
+"$WORKSPACE/.venv/bin/pip" install -q -r "$HERE/requirements.txt" \
+    || { echo "  ❌ 依赖安装失败（详见 requirements.txt）"; exit 1; }
 # import 自检：装上了但 import 不了的隐性失败在这里暴露
 "$WORKSPACE/.venv/bin/python" -c "import uiautomator2, rapidocr_onnxruntime" \
     || { echo "  ❌ 依赖 import 自检失败"; exit 1; }
@@ -79,4 +79,7 @@ echo "✅ 安装完成！快速开始:"
 echo "  cd $HERE/framework          # 注意：cd 到 skill 包，不是工作区"
 echo "  .venv 里执行: $WORKSPACE/.venv/bin/python run_case.py <用例名>.py"
 echo "  示例: $WORKSPACE/.venv/bin/python run_case.py com.zui.calendar/172.py"
+echo ""
+echo "  建议执行 smoke 探针验证全链路:"
+echo "  $WORKSPACE/.venv/bin/python $HERE/framework/smoke.py"
 echo "════════════════════════════════════════════"

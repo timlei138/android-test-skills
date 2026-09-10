@@ -33,7 +33,12 @@ def _workspace_dir() -> str:
         return os.path.join(os.path.expanduser("~"), "dsh-android-test")
 
 
-VISION_CONF_FILE = os.path.join(_workspace_dir(), "storage", "vision.json")
+VISION_CONF_FILE = None  # 惰性求值：import 后改环境变量仍生效
+
+
+def _vision_conf_path() -> str:
+    """视觉配置文件路径（惰性求值，每次调用时重新解析工作区）。"""
+    return os.path.join(_workspace_dir(), "storage", "vision.json")
 
 
 def _load_vision_conf() -> dict:
@@ -41,7 +46,7 @@ def _load_vision_conf() -> dict:
     缺失字段返回空串（tap_strategy 空串 = auto，由 vision_tap.resolve_strategy 解释）。"""
     out = {"base_url": "", "model": "", "api_key": "", "tap_strategy": ""}
     try:
-        with open(VISION_CONF_FILE, encoding="utf-8") as f:
+        with open(_vision_conf_path(), encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             for k in out:

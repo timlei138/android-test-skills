@@ -143,6 +143,46 @@ class States:
     # @state("is_xxx", "...", triggers=[...])
     # def is_xxx(self): ...
 
+    # ── 环境漂移检测 ────────────────────────────────────────────────
+    # 用例执行过程中可能修改设备设置（旋转、勿扰、亮度……），
+    # 如果收尾时没还原，下一个用例的基线就被污染 → 连锁 FAIL。
+    # env_snapshot() 取基线 → finish() 前 env_diff() 比对 → 非空记 WARN。
+
+    # 漂移检测关注的设置项（key → adb 读取方式）
+    # 不包含 foreground_package（前台包变化是测试目的，不是污染）
+    # 不包含 screen_brightness（自动亮度机型有波动误报风险）
+    _ENV_KEYS = [
+        ("accelerometer_rotation", ("settings", "get", "system", "accelerometer_rotation")),
+        ("user_rotation",          ("settings", "get", "system", "user_rotation")),
+        ("stay_on_while_plugged_in", ("settings", "get", "global", "stay_on_while_plugged_in")),
+        ("zen_mode",               ("settings", "get", "global", "zen_mode")),
+    ]
+
+    def env_snapshot(self):
+        """取设备环境快照（dict），用于漂移检测基线。
+
+        包含 accelerometer_rotation / user_rotation /
+        stay_on_while_plugged_in / zen_mode。
+        """
+        snap = {}
+        for key, cmd in self._ENV_KEYS:
+            snap[key] = self.adb.shell(*cmd)
+        return snap
+
+    def env_diff(self, before, ignore=()):
+        """与基线比对，返回 {键: (前, 后)} 的差异子集。
+
+        ignore: 豁免的键集合（如 ('user_rotation',)），不计入差异。
+        """
+        after = self.env_snapshot()
+        diff = {}
+        for k in before:
+            if k in ignore:
+                continue
+            if before.get(k) != after.get(k):
+                diff[k] = (before.get(k), after.get(k))
+        return diff
+
     # ── 未定义方法的兜底 ──────────────────────────────────────────
     def __getattr__(self, name):
         """调用不存在的方法时，给一条能直接照做的报错，而不是裸 AttributeError。

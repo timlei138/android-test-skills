@@ -17,6 +17,7 @@
 """
 import ast
 import importlib.util
+import logging
 import os
 import sys
 
@@ -60,13 +61,14 @@ if HERE not in sys.path:
 
 
 def _iter_case_files():
-    """递归产出所有用例文件（绝对路径）。排除 _ 开头的共享模块（_flow.py 等）。"""
+    """递归产出所有用例文件（绝对路径）。排除 _ 开头的共享模块与目录（_flow.py、_lib/ 等）。"""
     for d in CASE_DIRS:
         if not os.path.isdir(d):
             continue
         for root, dirs, files in os.walk(d):
             dirs[:] = [x for x in dirs
-                       if x not in ("__pycache__",) and not x.startswith(".")]
+                       if x not in ("__pycache__",)
+                       and not x.startswith((".", "_"))]
             for f in files:
                 if f.endswith(".py") and not f.startswith("_"):
                     yield os.path.join(root, f)
@@ -113,7 +115,7 @@ def resolve_case(name: str) -> str | None:
 # setup 会把 framework/ 复制到工作区，改动靠 sync_skill.ps1 双向搬运；
 # 忘了同步就会出现"改的代码不生效"。启动时对比两份拷贝的关键文件哈希。
 _DRIFT_KEY_FILES = ("test_framework.py", "states.py", "run_case.py", "db.py",
-                    "vision.py", "ocr_screen.py", "webui.py")
+                    "vision.py", "ocr_screen.py", "webui.py", "VERSION")
 
 
 def _file_digest(path):
@@ -198,21 +200,79 @@ def _last_case():
     return getattr(tf, "LAST_CASE", None) if tf else None
 
 
-def main():
-    if len(sys.argv) < 2:
-        print("用法: python run_case.py <用例文件名或 com.zui.calendar/172.py>")
+def _parse_args(argv):
+    """解析命令行参数，返回 (name, device)。
+
+    支持: python run_case.py [--device SERIAL] <用例名>
+    device=None 时 TestCase 自动选唯一授权设备。
+    """
+    args = list(argv[1:])
+    device = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--device" and i + 1 < len(args):
+            device = args[i + 1]
+            args[i:i + 2] = []
+        else:
+            i += 1
+    if not args:
+        print("用法: python run_case.py [--device SERIAL] <用例文件名或 com.zui.calendar/172.py>")
         sys.exit(3)
+    return args[0], device
+
+
+def _setup_logging():
+    """结构化日志：每次执行落 storage/logs/run_<ts>.log，print 保留控制台。
+    日志含时间戳+级别，便于回溯问题；print 输出不受影响。
+    失败静默（日志目录不可写不阻断执行）。
+    """
+    try:
+        from db import default_test_dir
+        log_dir = os.path.join(default_test_dir(), "storage", "logs")
+    except Exception:
+        log_dir = os.path.join(HERE, "..", "storage", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    ts = __import__("datetime").datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(log_dir, f"run_{ts}.log")
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG)
+    logging.info("日志文件: %s", log_path)
+    return log_path
+
+
+def main():
+    name, device = _parse_args(sys.argv)
+    # 结构化日志：每次执行落 storage/logs/run_<ts>.log
+    try:
+        _setup_logging()
+    except Exception:
+        pass  # 日志失败不阻断执行
+    # 套件 runner 传 --device SERIAL 时，注入环境变量供 TestCase 读取
+    if device:
+        os.environ["DSH_DEVICE_ID"] = device
     try:
         warn_if_framework_drift()
     except Exception:
         pass                        # 检测失败不影响用例执行
-    name = sys.argv[1]
     path = resolve_case(name)
     if path is None:
         print(f"用例文件不存在或匹配不唯一: {name}")
         for d in CASE_DIRS:
             print(f"  已查找: {d}/")
         sys.exit(3)
+
+    # 输出版本号（便于确认运行的是哪份框架代码）
+    try:
+        ver_path = os.path.join(HERE, "VERSION")
+        with open(ver_path, encoding="utf-8") as _vf:
+            _ver = _vf.read().strip()
+        print(f"[版本] {_ver}")
+    except Exception:
+        pass
 
     # 输出最终生效的关键路径（排查"跑的代码/用例不是我以为的那份"）
     try:

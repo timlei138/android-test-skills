@@ -140,7 +140,7 @@ def run():
     if not t.tap_text("课程时间设置", wait=4, silent=True):
         t.record("FAIL", f"未找到'课程时间设置'入口，屏幕={t.screen_text()[:8]}")
         return t.finish()
-    time.sleep(2)
+    time.sleep(2)  # 等课程时间设置页渲染
     t.observe_dialogs(rounds=3)
     act = t.current_activity()
     tx = t.screen_text()
@@ -231,7 +231,7 @@ def run():
         t.record("FAIL", f"滚动 4 屏仍未找到'课程提醒时间'入口，"
                          f"屏幕={t.screen_text()[:8]}")
         return t.finish()
-    time.sleep(1.6)
+    time.sleep(1.6)  # 等提醒时间选项渲染
     t.observe_dialogs(rounds=3)
     tx = t.screen_text()
     miss = [o for o in REMIND_OPTS if not any(o in x for x in tx)]

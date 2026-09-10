@@ -148,6 +148,19 @@ CREATE TABLE IF NOT EXISTS step_actions (
   duration_ms INTEGER,
   created_at TEXT
 );
+CREATE TABLE IF NOT EXISTS suites (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT,
+  finished_at TEXT,
+  filter TEXT,
+  total INT,
+  pass_n INT,
+  fail_n INT,
+  blocked_n INT,
+  error_n INT,
+  warn_n INT,
+  report_path TEXT
+);
 """
 
 # 旧库迁移：为早期建的表补列（幂等；列已存在时 ALTER 抛错，忽略即可）
@@ -160,6 +173,9 @@ _MIGRATIONS = [
     # package：被测 App 包名。报告丢了可以重建，但包名只写在报告里 ——
     # 不入库的话重建出来的报告这一栏就是空的。
     "ALTER TABLE cases ADD COLUMN package TEXT",
+    # suite_id：套件 runner 关联（run_suite.py 插入 suites 行后透传给子进程）。
+    # 单跑时该列为 NULL，不影响现有逻辑。
+    "ALTER TABLE cases ADD COLUMN suite_id INTEGER",
 ]
 
 
@@ -232,16 +248,22 @@ class RecordDB:
                 self._local.conn = None
 
     # ── cases ────────────────────────────────────────────────────────
-    def start_case(self, name, device, started_at=None, user_input=None, script_path=None):
+    def start_case(self, name, device, started_at=None, user_input=None, script_path=None,
+                   suite_id=None):
         with self._lock:
             cur = self._connect().cursor()
             cur.execute(
-                "INSERT INTO cases (name, device, started_at, user_input, script_path)"
-                " VALUES (?,?,?,?,?)",
+                "INSERT INTO cases (name, device, started_at, user_input, script_path, suite_id)"
+                " VALUES (?,?,?,?,?,?)",
                 (name, device, started_at or datetime.now().isoformat(timespec="seconds"),
-                 user_input, script_path))
+                 user_input, script_path, suite_id))
+            new_id = cur.lastrowid
             self._local.conn.commit()
-            return cur.lastrowid
+        # 迭代清理：脚本被改过 + 同设备 + 非套件 → 旧记录是探索噪音，清掉。
+        # 放在锁外：级联删 + 磁盘产物清理可能耗时，不阻塞其它并发操作。
+        if script_path and suite_id is None:
+            self._cleanup_iterated_cases(script_path, device, new_id)
+        return new_id
 
     def finish_case(self, case_id, report_path, summary, final_status=None,
                     finished_at=None, package=None):
@@ -305,6 +327,117 @@ class RecordDB:
                 self._local.conn.commit()
             return filled
 
+    # ── flakiness 查询 ──────────────────────────────────────────────
+    def case_history(self, script_path, limit=20):
+        """同一用例脚本的近期执行历史（新→旧）。
+
+        返回 [{id, final_status, started_at, finished_at, report_path,
+               duration_seconds}]，供前端历史时间线渲染。
+        """
+        with self._lock:
+            cur = self._connect().cursor()
+            cur.execute(
+                "SELECT id, final_status, started_at, finished_at, report_path,"
+                "  ROUND((julianday(finished_at)-julianday(started_at))*86400,1) AS dur"
+                " FROM cases"
+                " WHERE script_path=? AND final_status IS NOT NULL AND final_status <> ''"
+                " ORDER BY id DESC LIMIT ?",
+                (script_path, limit))
+            cols = ["id", "final_status", "started_at", "finished_at",
+                    "report_path", "duration_seconds"]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def flaky_stats(self, min_runs=5):
+        """全量用例的通过率统计。
+
+        返回 [{script_path, package, runs, pass_rate, flaky}]。
+        flaky 判定：runs >= min_runs 且 0.2 < pass_rate < 0.8。
+        通过口径：final_status IN ('PASS','WARN')——WARN 退出码 0、不阻断 CI。
+        """
+        with self._lock:
+            cur = self._connect().cursor()
+            cur.execute(
+                "SELECT script_path, package, COUNT(*) AS runs,"
+                "  SUM(CASE WHEN final_status IN ('PASS','WARN') THEN 1 ELSE 0 END)"
+                "   *1.0/COUNT(*) AS pass_rate"
+                " FROM cases"
+                " WHERE script_path IS NOT NULL AND final_status IS NOT NULL"
+                "   AND final_status <> ''"
+                " GROUP BY script_path")
+            rows = cur.fetchall()
+            result = []
+            for sp, pkg, runs, rate in rows:
+                rate = round(rate, 4) if rate else 0.0
+                flaky = (runs >= min_runs and 0.2 < rate < 0.8)
+                result.append({
+                    "script_path": sp, "package": pkg,
+                    "runs": runs, "pass_rate": rate, "flaky": flaky})
+            return result
+
+    def card_freshness(self):
+        """每包的最近验证时间（知识卡新鲜度）。
+
+        返回 [{package, last_pass_at, last_pass_id, last_run_at, last_run_id, runs}]。
+        验证定义：final_status='PASS' 的执行（WARN 不算验证通过）。
+        """
+        with self._lock:
+            cur = self._connect().cursor()
+            # 最近 PASS
+            cur.execute(
+                "SELECT package, MAX(started_at), "
+                "  (SELECT id FROM cases c2"
+                "   WHERE c2.package = c1.package AND c2.final_status = 'PASS'"
+                "   ORDER BY c2.started_at DESC LIMIT 1) AS pass_id"
+                " FROM cases c1"
+                " WHERE final_status = 'PASS' AND package IS NOT NULL"
+                " GROUP BY package")
+            pass_rows = {pkg: {"last_pass_at": at, "last_pass_id": pid}
+                         for pkg, at, pid in cur.fetchall()}
+            # 最近执行（任何状态）
+            cur.execute(
+                "SELECT package, MAX(started_at), "
+                "  (SELECT id FROM cases c2"
+                "   WHERE c2.package = c1.package AND c2.final_status IS NOT NULL"
+                "   ORDER BY c2.started_at DESC LIMIT 1) AS run_id,"
+                "  COUNT(*) AS runs"
+                " FROM cases c1"
+                " WHERE package IS NOT NULL AND final_status IS NOT NULL"
+                "   AND final_status <> ''"
+                " GROUP BY package")
+            result = []
+            for pkg, last_run_at, run_id, runs in cur.fetchall():
+                pi = pass_rows.get(pkg, {})
+                result.append({
+                    "package": pkg,
+                    "last_pass_at": pi.get("last_pass_at"),
+                    "last_pass_id": pi.get("last_pass_id"),
+                    "last_run_at": last_run_at,
+                    "last_run_id": run_id,
+                    "runs": runs,
+                })
+            return result
+
+    # ── suites ──────────────────────────────────────────────────────
+    def start_suite(self, filter_desc, total):
+        """插入套件记录，返回 suite_id。子进程通过 DSH_SUITE_ID 环境变量关联。"""
+        with self._lock:
+            cur = self._connect().cursor()
+            cur.execute(
+                "INSERT INTO suites (started_at, filter, total) VALUES (?,?,?)",
+                (datetime.now().isoformat(timespec="seconds"), filter_desc, total))
+            self._local.conn.commit()
+            return cur.lastrowid
+
+    def finish_suite(self, suite_id, pass_n, fail_n, blocked_n, error_n, warn_n,
+                     report_path, finished_at=None):
+        with self._lock:
+            self._connect().execute(
+                "UPDATE suites SET finished_at=?, pass_n=?, fail_n=?, blocked_n=?,"
+                " error_n=?, warn_n=?, report_path=? WHERE id=?",
+                (finished_at or datetime.now().isoformat(timespec="seconds"),
+                 pass_n, fail_n, blocked_n, error_n, warn_n, report_path, suite_id))
+            self._local.conn.commit()
+
     # ── steps ────────────────────────────────────────────────────────
     def add_step(self, case_id, name, ord_):
         with self._lock:
@@ -348,6 +481,8 @@ class RecordDB:
         默认隐藏内部记录（名称以 _ 开头：__probe__ / __states_probe__ 等
         框架探针与调试用例），它们是执行过程的中间数据，不是真用例。
         include_internal=True 时全量返回（命令行排查用）。
+
+        迭代噪音由 start_case() 的 mtime 检测自动清理，这里不再去重。
         """
         with self._lock:
             cur = self._connect().cursor()
@@ -373,6 +508,44 @@ class RecordDB:
                     "report_path", "summary", "user_input", "script_path",
                     "package", "duration_seconds", "status"]
             return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    def _cleanup_iterated_cases(self, script_path, device, exclude_id):
+        """清理同脚本的迭代旧记录（脚本被改过 → 旧记录是探索噪音）。
+
+        判定规则：
+          script mtime > 旧记录 started_at  →  脚本被改过了  →  迭代  →  删
+          script mtime <= 旧记录 started_at →  脚本没动    →  有意复跑 →  留
+
+        条件叠加（B+C）：
+          - 同 script_path + 同 device（换设备保留）
+          - suite_id IS NULL（套件记录保留）
+        """
+        # 脚本文件不存在（可能被删了）或 mtime 取不到 → 不清理
+        try:
+            mtime = os.path.getmtime(script_path)
+        except OSError:
+            return
+        mtime_iso = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+
+        with self._lock:
+            cur = self._connect().cursor()
+            cur.execute(
+                "SELECT id, started_at FROM cases"
+                " WHERE script_path=? AND device=? AND suite_id IS NULL AND id!=?"
+                " ORDER BY id DESC",
+                (script_path, device, exclude_id))
+            old_ids = []
+            for oid, sat in cur.fetchall():
+                # 脚本 mtime > 旧记录开始时间 → 脚本在上次跑后被改过
+                if (sat or "") < mtime_iso:
+                    old_ids.append(oid)
+
+        # 逐条复用 delete_case 的级联删除 + 产物清理逻辑
+        for oid in old_ids:
+            try:
+                self.delete_case(oid, remove_artifacts=True)
+            except Exception:
+                pass  # 清理失败不阻塞主流程
 
     def delete_case(self, case_id, remove_artifacts=False):
         """删除用例记录，级联删除 steps/results/evidences/actions。
@@ -544,6 +717,33 @@ def get_db():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="测试记录数据库 CLI")
+    parser.add_argument("--stale-cards", type=int, metavar="DAYS",
+                        help="列出超过 N 天未验证的知识卡")
+    args = parser.parse_args()
+
     db = get_db()
-    for c in db.list_cases(5):
-        print(f"#{c['id']} {c['name']} {c['started_at']} {c['summary']}")
+    if args.stale_cards is not None:
+        from datetime import datetime as _dt, timedelta
+        cutoff = (_dt.now() - timedelta(days=args.stale_cards)).isoformat(
+            timespec="seconds")
+        rows = db.card_freshness()
+        stale = [r for r in rows
+                 if not r["last_pass_at"] or r["last_pass_at"] < cutoff]
+        never = [r for r in rows if not r["last_pass_at"]]
+        expired = [r for r in rows
+                   if r["last_pass_at"] and r["last_pass_at"] < cutoff]
+        if never:
+            print(f"🔴 从未验证 ({len(never)}):")
+            for r in never:
+                print(f"  {r['package']} ({r['runs']} 次执行)")
+        if expired:
+            print(f"🟡 超过 {args.stale_cards} 天未验证 ({len(expired)}):")
+            for r in expired:
+                print(f"  {r['package']} 最后 PASS: {r['last_pass_at']}")
+        if not stale:
+            print(f"✅ 全部知识卡在 {args.stale_cards} 天内有验证记录")
+    else:
+        for c in db.list_cases(5):
+            print(f"#{c['id']} {c['name']} {c['started_at']} {c['summary']}")

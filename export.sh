@@ -5,7 +5,8 @@ set -e
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(basename "$HERE")"          # android-gui-testing
-VERSION="${1:-v1}"
+# 版本号优先取 framework/VERSION；命令行参数可覆盖
+VERSION="${1:-$(cat "$HERE/framework/VERSION" 2>/dev/null || echo v1)}"
 OUT="$HERE/../${SKILL_DIR}-${VERSION}.zip"
 
 cd "$HERE/.."

@@ -1,0 +1,18 @@
+name: test
+on: [push, pull_request]
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # CI 无 Android 设备，只跑无设备层：单测 + lint + 预算门禁
+      # 真机验收（suite / smoke / 漂移检测）在本地开发机执行
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover -s tests -v
+      - run: python scripts/check_context_budget.py
+      - run: python evals/lint_case.py cases/ --baseline
