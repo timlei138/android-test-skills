@@ -297,6 +297,10 @@ Write-Host "  pwsh -File `"$SkillDir\scripts\webui.ps1`" start"
 Write-Host ''
 Write-Host "  工作区: $Workspace" -ForegroundColor DarkGray
 Write-Host "  报告输出: $Workspace\storage\reports\" -ForegroundColor DarkGray
+Write-Host ''
+Write-Host "  维护提示：改过 scripts\*.ps1 后跑一次 BOM 校验（PS 5.1 无 BOM 会按 GBK" -ForegroundColor DarkGray
+Write-Host "  解析导致脚本崩溃；-Fix 可自动补回）：" -ForegroundColor DarkGray
+Write-Host "  pwsh -File `"$SkillDir\scripts\check_bom.ps1`" -Fix" -ForegroundColor DarkGray
 
 if ($Smoke) {
     Write-Host ''

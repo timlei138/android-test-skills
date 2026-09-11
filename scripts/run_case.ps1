@@ -62,12 +62,23 @@ $caseDirs = @(
     (Join-Path $fwDir 'cases')
 ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -Unique
 
+# 共享模块判定：路径任一层以 _ 开头即共享（_flow.py、_lib/inventory.py …）。
+# 与 framework/run_case.py 的 _iter_case_files() 同一套规则 —— 只看文件名会
+# 漏掉「文件名正常但父目录是 _lib/」的情况，导致工具模块被当用例列出/执行。
+function Test-SharedModule {
+    param([string]$FullPath, [string]$CaseRoot)
+    $rel = $FullPath.Substring($CaseRoot.Length).TrimStart('\', '/')
+    $parts = $rel -split '[/\\]'
+    foreach ($p in $parts) { if ($p.StartsWith('_')) { return $true } }
+    return $false
+}
+
 if ($List -or -not $Case) {
     Write-Host '可用用例（按包名分目录）:' -ForegroundColor Cyan
     foreach ($d in $caseDirs) {
         Write-Host "  [$d]" -ForegroundColor DarkGray
         Get-ChildItem -LiteralPath $d -Filter '*.py' -File -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -notlike '_*' -and $_.FullName -notmatch '__pycache__' } |
+            Where-Object { $_.FullName -notmatch '__pycache__' -and -not (Test-SharedModule $_.FullName $d) } |
             ForEach-Object {
                 $rel = $_.FullName.Substring($d.Length).TrimStart('\', '/') -replace '\\', '/'
                 Write-Host "    - $rel"
@@ -102,7 +113,7 @@ function Resolve-CasePath {
     $hits = @()
     foreach ($d in $caseDirs) {
         $hits += @(Get-ChildItem -LiteralPath $d -Filter $n -File -Recurse -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -notlike '_*' -and $_.FullName -notmatch '__pycache__' })
+                   Where-Object { $_.FullName -notmatch '__pycache__' -and -not (Test-SharedModule $_.FullName $d) })
     }
     if ($hits.Count -eq 1) { return $hits[0].FullName }
     if ($hits.Count -gt 1) {
@@ -114,7 +125,7 @@ function Resolve-CasePath {
     $hits = @()
     foreach ($d in $caseDirs) {
         $hits += @(Get-ChildItem -LiteralPath $d -Filter "*$n*" -File -Recurse -ErrorAction SilentlyContinue |
-                   Where-Object { $_.Name -notlike '_*' -and $_.FullName -notmatch '__pycache__' })
+                   Where-Object { $_.FullName -notmatch '__pycache__' -and -not (Test-SharedModule $_.FullName $d) })
     }
     if ($hits.Count -eq 1) { return $hits[0].FullName }
     if ($hits.Count -gt 1) {

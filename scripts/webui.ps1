@@ -19,7 +19,10 @@ param(
 
     [int]$Port = 8900,
 
-    [string]$Host = '127.0.0.1',
+    # 注意：参数名不能用 $Host —— 它是 PowerShell 只读自动变量（Constant,
+    # AllScope），用作 param 名会在绑定阶段直接抛
+    # "Cannot overwrite variable Host"，脚本在任何 Windows 上都无法启动。
+    [string]$HostAddr = '127.0.0.1',
 
     [string]$Workspace = $(if ($env:DSH_WORKSPACE_DIR) { $env:DSH_WORKSPACE_DIR }
                            else { Join-Path $HOME 'android-test-skills-data' })
@@ -127,7 +130,7 @@ switch ($Action) {
         $env:PYTHONUTF8 = '1'
 
         $proc = Start-Process -FilePath $VenvPy `
-                              -ArgumentList @("`"$WebUI`"", '--port', $Port, '--host', $Host) `
+                              -ArgumentList @("`"$WebUI`"", '--port', $Port, '--host', $HostAddr) `
                               -WorkingDirectory (Join-Path $SkillDir 'framework') `
                               -RedirectStandardOutput $LogFile `
                               -RedirectStandardError (Join-Path $SkillDir 'webui.err.log') `

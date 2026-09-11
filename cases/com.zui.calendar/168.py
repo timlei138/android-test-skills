@@ -30,6 +30,14 @@ PKG = "com.zui.calendar"
 def run():
     t = TestCase("联想日历_168")
 
+    # 清场钩子：登记"退出时还原自动旋转"。
+    # 本用例无显式转屏代码，但 pm_clear + 首启授权流程会隐式把
+    # accelerometer_rotation 从 0 变成 1（实测报告记了污染 0→1），
+    # 残留会让后续用例坐标系全错（见 lock_portrait 注释的 119 血泪教训）。
+    # add_prop_restore 先读原值、退出时自动还原，且任何退出路径都执行
+    # （含中途 return / 异常），比写在函数末尾可靠。
+    t.add_prop_restore("accelerometer_rotation")
+
     # ── 前置条件：确保无课程表（pm clear 重置到首次使用）────────────
     t.step("前置条件-清空课程表并授权")
     t.pm_clear(PKG)

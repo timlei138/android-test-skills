@@ -174,7 +174,7 @@ def run():
                  f"未识别到 DatePicker 类，屏幕文本含年月字样={has_like}，屏幕={tx[:8]}")
     # 关闭弹框：优先「取消」，避免改动日期
     if not t.tap_text("取消", wait=3, silent=True):
-        t.adb_shell("input", "keyevent", "4")   # 无取消键则 BACK 关弹框
+        t.back()   # 无取消键则 BACK 关弹框
         time.sleep(1)
     time.sleep(0.8)
     now_date = _text(t, TV_SEM_START)
@@ -198,7 +198,7 @@ def run():
         t.record("WARN", f"点击当前周数后未检测到选择控件，屏幕={txt3[:10]}")
     # 关键：关闭选择控件，否则会盖住编辑页导致后续步骤读不到开关/总周数（177 首跑级联 WARN/FAIL 根因）
     if not t.tap_text("取消", wait=3, silent=True):
-        t.adb_shell("input", "keyevent", "4")
+        t.back()
         time.sleep(1)
     time.sleep(0.8)
 
@@ -222,7 +222,7 @@ def run():
                 if tx.strip() == str(target)]
         if not hits:
             t.record("WARN", f"滚轮上未 OCR 到 {target}（附截图人工核对）")
-            t.tap_text("取消", wait=2, silent=True) or t.adb_shell("input", "keyevent", "4")
+            t.tap_text("取消", wait=2, silent=True) or t.back()
             time.sleep(0.8)
         else:
             t.record("INFO", f"滚轮候选含 {target}，OCR 定位 {hits[0]} 点选")
@@ -282,12 +282,28 @@ def run():
     _hide_ime(t)
     name_now = _text(t, NAME)
     t.record("INFO", f"名称已清空（当前值 {name_now!r}）")
-    # 学期开始时间为日期行（弹框选择制，UI 无文本清空入口，有默认值），
-    # 必填空置以名称清空为准（与 174 确认页一致）
-    t.record("INFO", "学期开始时间为日期选择行、有默认值且 UI 无文本清空入口，必填项空置以名称清空为准")
-    t.screenshot("07_名称清空")
-    grayed_ok = t.assert_button_state_visual(
-        FINISH, "grayed", msg="名称为空时完成按钮置灰（视觉断言）")
+    # 学期开始时间为日期选择行：默认已有值，且点开日期弹框后**无法选择空值**
+    # （必须选中某个日期才能确认），因此该字段客观上无法置空 —— 记 WARN：
+    # 用例文本要求「两项都不能为空」，但其中一项连置空手段都不存在。
+    t.record("WARN",
+             "学期开始时间无法置空：默认已有值，点击后只能选择具体日期、UI 无清空/取消为空的入口，"
+             "故该必填项不存在『为空』状态可供验证")
+
+    # 置灰判定改用 UI 树的 enabled 属性（视觉模型对「置灰/可点击」判定不稳定：
+    # 实测同一按钮在名称为空/已填两种状态下都回答「置灰」）。
+    # 失败点落在「课程表名称为空时完成按钮仍可点击」—— 与预期『两项都有内容才可
+    # 点击』不符，记 FAIL（这是用例真正要验的校验缺失）。
+    fin_empty = t.read_rid(FINISH)
+    en_empty = (fin_empty or {}).get("enabled", "") if isinstance(fin_empty, dict) else ""
+    clk_empty = (fin_empty or {}).get("clickable", "") if isinstance(fin_empty, dict) else ""
+    if en_empty == "false":
+        t.record("PASS", f"课程表名称为空时完成按钮置灰（enabled 属性）: enabled={en_empty}")
+        grayed_ok = True
+    else:
+        t.record("FAIL",
+                 f"课程表名称为空时完成按钮仍可点击（应置灰）: enabled={en_empty or '未知'}, "
+                 f"clickable={clk_empty or '未知'} —— 必填校验缺失")
+        grayed_ok = False
     if not grayed_ok:
         # 与规格『置灰』不符 → 补行为证据：空名点「完成」是否被校验拦截
         fin = t.read_rid(FINISH)
@@ -309,14 +325,15 @@ def run():
     time.sleep(0.8)
     _hide_ime(t)
     t.screenshot("07_名称恢复")
-    try:
-        t.assert_button_state_visual(FINISH, "clickable",
-                                     msg="信息完整时完成按钮可点击（视觉断言）")
-    except Exception as e:
-        t.record("WARN", f"视觉可点击断言异常: {e}（附截图人工核对）")
+    fin_full = t.read_rid(FINISH)
+    en_full = (fin_full or {}).get("enabled", "") if isinstance(fin_full, dict) else ""
+    clk_full = (fin_full or {}).get("clickable", "") if isinstance(fin_full, dict) else ""
+    t.record("PASS" if en_full == "true" else "FAIL",
+             f"名称恢复后完成按钮可点击（enabled 属性）: enabled={en_full or '未知'}, "
+             f"clickable={clk_full or '未知'}")
 
     # 不点「完成」（会创建课程表），BACK 离开编辑页收尾
-    t.adb_shell("input", "keyevent", "4")
+    t.back()
     return t.finish()
 
 

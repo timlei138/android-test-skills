@@ -6,6 +6,7 @@ Android GUI 测试框架：元素操作、断言、截图、Toast 捕捉、置�
 import io
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -325,6 +326,26 @@ def _is_probe_case(name):
     return bool(name) and name.upper().startswith(_PROBE_NAME_PREFIXES)
 
 
+def _should_record(user_input, name):
+    """是否把本次执行写入 SQLite 记录库（用户 2026-09-11 定的规则）。
+
+    **主判据 = 有 USER_INPUT**：只有"用户口述的正式用例"才带 USER_INPUT
+    （run_case.py 的 extract_user_input 从脚本源码里提取），探查/补采/
+    备数据/补验/框架自测这类辅助脚本天然没有。
+
+    为什么不用命名前缀判定（旧规则只有 _PROBE_NAME_PREFIXES）：
+    命名是**约定**、可能被违反——实测 AI 起的临时脚本名是「探查_186_设为当前
+    与清空」「备数据_186c」「补采D_185_置灰逻辑」，一个都不匹配 PROBE_/RECON_，
+    于是全部混入记录库（13 条脏记录）。USER_INPUT 是**事实**，不可能被起名绕过。
+
+    `_is_probe_case` 保留作补充：smoke.py 的 PROBE_smoke 无 USER_INPUT，
+    两种判据都会挡住；显式前缀意图更明确，留着无害。
+    """
+    if user_input is not None and str(user_input).strip():
+        return True
+    return False
+
+
 class TestCase:
     def __init__(self, name, device_id=None, case_dir=None, user_input=None, script_path=None,
                  vision=None, env_ignore=()):
@@ -381,8 +402,12 @@ class TestCase:
         self._dump_count = 0
         # 采集会话档案：TraceRecorder 独立模块承担落盘，TestCase 只做委托
         # （set_trace 开启后 dump 快照全落盘 + events.jsonl + index.json）
+        # ⚠️ 必须在 _maybe_auto_trace() **之前**创建：那个方法会调用
+        #    set_trace() 开启会话，若此处再 new 一个就把它覆盖掉
+        #    （2026-09-11 踩过：enabled 被重置为 False）。
         from trace_recorder import TraceRecorder
         self.trace = TraceRecorder(STORAGE_DIR)
+        self._maybe_auto_trace()
         # 视觉模型路由（VisionProvider）：用户配置（vision.json）> Agent 注入。
         # vision= 参数只在生成期/调试期由 Agent 注入（建议实现 ask/ask_json，
         # 契约见 vision_provider.py 模块头）；run_case 独立执行时无 Agent 在环，
@@ -402,12 +427,15 @@ class TestCase:
         self._db_case_id = None
         self._db_step_id = None
         self._db_step_ord = 0
-        # SQLite 记录：只记正式用例。判定标准 = 有 script_path 且非探针前缀：
-        #   - 经 run_case.py 执行正式用例 → 注入 DSH_CASE_SCRIPT_PATH → 入库
-        #   - 探针/探查脚本（名称以 PROBE_ / RECON_ 开头，如 PROBE_178f /
-        #     RECON_178）→ 不入库，它们是调试中间数据，不是测试结果（用户确认规则）
-        #   - AI 直接跑临时脚本（无 script_path）→ 不入库
-        if self.script_path and not _is_probe_case(self.name):
+        # SQLite 记录：**只记带 USER_INPUT 的正式用例**（用户 2026-09-11 定）。
+        #   - 正式用例：源码含 USER_INPUT（run_case.py 提取 → DSH_CASE_USER_INPUT）→ 入库
+        #   - 探查/补采/备数据/补验/框架自测等辅助脚本 → **完全不入库**（B1）
+        #     报告/截图/trace 照常生成，只是不写记录库——记录库是给人看的验收
+        #     结果，不是调试日志；探查数据已由 traces/ + probes/ 持久化。
+        #   - 无 script_path（直接跑临时脚本）→ 不入库
+        # 旧规则用名称前缀（PROBE_/RECON_）判定，被中文临时脚本名绕过 →
+        # 实测混入 13 条脏记录。详见 _should_record 的说明。
+        if self.script_path and _should_record(self.user_input, self.name):
             try:
                 from db import get_db
                 self._db = get_db()
@@ -417,6 +445,11 @@ class TestCase:
                     self.name, self.device_info,
                     user_input=self.user_input, script_path=self.script_path,
                     suite_id=int(_suite_id) if _suite_id else None)
+                # 「只留最新」：同一用例（同 name）的历史执行记录连同子表一并清掉，
+                # 避免 cases 越积越多 + 子表孤儿数据（steps/results/evidences/actions）。
+                # 用 script_path 精确到"同一个用例文件"，不误伤同名不同包。
+                self._db.drop_previous_cases(self.name, self.script_path,
+                                             keep_id=self._db_case_id)
             except Exception as e:
                 # 入库失败不再静默：记录丢失意味着 Web UI/追溯链断裂
                 print(f"⚠️ [db] 用例入库失败（测试继续，但本次执行无记录）: {e}")
@@ -444,6 +477,14 @@ class TestCase:
                 self._env_baseline = self.states.env_snapshot()
         except Exception:
             pass   # 取基线失败不阻断用例
+        # ── 清场钩子（cleanups）──────────────────────────────────────
+        # 用例用 add_cleanup() 登记"必须还原"的动作，finish() 时逆序执行。
+        # 存在的理由：用例中途 return t.finish() 或抛异常时，写在函数末尾的
+        # 还原代码会被跳过 → 设备状态残留污染下一个用例（168 实测把
+        # accelerometer_rotation 留在 1，后续用例坐标系全错）。
+        # 与 try/finally 的区别：一次登记、任何退出路径都执行（含异常兜底）。
+        self._cleanups = []
+        self._cleanups_ran = False
         # 探针用例：进程退出兜底清理（覆盖未正常调用 finish 的悬挂场景）
         if _is_probe_case(self.name):
             import atexit
@@ -509,6 +550,32 @@ class TestCase:
         return xml
 
     # ── 采集会话档案：薄委托 TraceRecorder（trace_recorder.py）──────
+    # 采集脚本文件名模式：这类脚本是"探路用的一次性脚本"，跑完即删，
+    # 其全部价值就在**过程中留下的 dump**，故自动开 trace。
+    COLLECT_SCRIPT_RE = re.compile(r"^(_collect|_probe|_explore)_.*\.py$")
+
+    def _maybe_auto_trace(self):
+        """采集脚本（_collect_*.py / _probe_*.py / _explore_*.py）自动开 trace。
+
+        识别依据是**脚本文件名**，不靠调用方记得调 set_trace()——"机制管记性"。
+        正式用例文件名（如 167.py）不匹配 → 不开 → 零额外 IO，行为不变。
+        可用环境变量强制开/关：DSH_TRACE=1 / DSH_TRACE=0。
+        """
+        force = os.environ.get("DSH_TRACE")
+        if force == "0":
+            return False
+        if force != "1":
+            sp = self.script_path or ""
+            if not self.COLLECT_SCRIPT_RE.match(os.path.basename(sp)):
+                return False
+        # trace 在 _dump() 里是惰性创建的，此处需先补齐（__init__ 早于首次 dump）
+        if getattr(self, "trace", None) is None:
+            from trace_recorder import TraceRecorder
+            self.trace = TraceRecorder(STORAGE_DIR)
+        self.set_trace()
+        print(f"   📼 采集脚本自动开启采集会话（{os.path.basename(self.script_path or '?')}）")
+        return True
+
     def set_trace(self, on=True):
         """开启采集会话档案：之后每次 _dump() 的 UI 树快照与关键事件全部落盘
         storage/traces/<用例名>/<会话时间戳>/。
@@ -1398,6 +1465,63 @@ class TestCase:
         return {"accel": self.settings_get("system", "accelerometer_rotation"),
                 "user": self.settings_get("system", "user_rotation")}
 
+    # ── 清场钩子（cleanups）────────────────────────────────────────
+    # 设计要点（改动前请读完）：
+    #  * 逆序执行（LIFO）：与 try/finally 的栈式展开一致，成对操作能正确嵌套还原。
+    #  * 单个钩子失败不影响其它：清场是"尽力而为"，不能因为某步失败就丢掉
+    #    后续还原，更不能把用例结论改写成 ERROR（清场失败 ≠ 测试失败）。
+    #  * 失败记 WARN 并留痕：清场没做干净是**环境问题**，必须让人看见，
+    #    否则下一个用例的莫名 FAIL 无从追溯（这是本机制要根治的症状）。
+    #  * 必须跑在漂移检测之前：否则清场动作自己会被 env_diff 判成污染。
+    def add_cleanup(self, fn, *args, **kwargs):
+        """登记一个清场动作，finish() 时逆序执行。
+
+        fn 可以是可调用对象，或形如 (callable, args, kwargs) 的元组。
+        典型用法：t.add_cleanup(t.restore_rotation, snap)
+        返回 None（登记即可，无需关心返回值）。
+        """
+        self._cleanups.append((fn, args, kwargs))
+        return None
+
+    def _run_cleanups(self):
+        """逆序执行所有已登记清场动作。幂等：重复调用只跑一次。
+
+        在 finish() 中、环境漂移检测之前调用，保证清场后的状态才是比对基准。
+        """
+        if self._cleanups_ran:
+            return
+        self._cleanups_ran = True
+        while self._cleanups:
+            fn, args, kwargs = self._cleanups.pop()
+            label = getattr(fn, "__name__", repr(fn))
+            try:
+                fn(*args, **kwargs)
+            except Exception as e:
+                # 清场失败不改写结论（不是测试失败），但必须留痕：
+                # 环境没还原干净会导致下一个用例莫名失败，得能追到源头。
+                try:
+                    self.record("WARN", f"清场失败（设备状态可能残留）: "
+                                        f"{label} → {type(e).__name__}: {e}")
+                except Exception:
+                    print(f"⚠️ 清场失败（且记录失败）: {label} → {e}")
+
+    def add_prop_restore(self, key, value=None):
+        """登记一条系统属性的还原：用例改了什么，这里照原样还回去。
+
+        value=None 时先读取当前值作为"原值"，再登记还原动作——即
+        「改之前调用，退出时自动还原」。用法：
+            t.add_prop_restore("accelerometer_rotation")   # 先读原值
+            t.adb_shell("settings", "put", "system", "accelerometer_rotation", "1")
+        """
+        if value is None:
+            try:
+                value = self.settings_get("system", key)
+            except Exception as e:
+                self.record("WARN", f"读取属性原值失败，跳过还原: {key} → {e}")
+                return None
+        self.add_cleanup(self.adb_shell, "settings", "put", "system", key, value)
+        return value
+
     def restore_rotation(self, snap):
         """恢复 snapshot_rotation() 记录的状态（恢复"进用例时的状态"，
         不是盲目开自动旋转）。snap 为空时为空操作。"""
@@ -1430,6 +1554,119 @@ class TestCase:
         if not m:
             m = re.search(r"ResumedActivity: ActivityRecord\{\S* u0 ([\w./]+) ", out)
         return m.group(1) if m else "unknown"
+
+    # ── 通用返回键（IME 感知）────────────────────────────────────────
+    # 通用规律（2026-09-10 实测确认）：输入法弹起时，第一次 BACK 只收起
+    # 输入法，**不触发页面返回**；IME 未弹起时按一次即可，多按会退过头。
+    # 所以"一律按两次"是错的——必须先判断 IME 在不在。
+    # 这是跨 App 的 Android 平台行为，与具体 App 无关，故放框架层。
+    # 背景：183 连续 3 次 BLOCKED「失败弹窗处理后未回到照片网格」，
+    #       根因之一就是裸按一次 BACK 被 IME 吞掉。
+
+    def ime_shown(self):
+        """输入法是否弹起（决定 BACK 会不会被吞）。"""
+        try:
+            out = self.adb_shell("dumpsys", "input_method")
+            return "mInputShown=true" in out
+        except Exception:
+            return False
+
+    def back(self, expect=None, timeout=8.0, silent=False):
+        """通用返回键：IME 感知，避免"第一次 BACK 被输入法吃掉"。
+
+        - IME 弹起 → 先按一次收输入法，再按一次真正返回
+        - IME 未弹起 → 只按一次（多按会退过头）
+
+        expect: 期望到达的 Activity 子串。给了就等到位；没到位再补按一次
+                （IME 判据偶尔失灵时靠目标页自愈）。不传则只发返回键。
+        返回: expect 为 None → True（已发键）；否则是否到达 expect。
+        """
+        t0 = time.time()
+        was_ime = self.ime_shown()
+        if was_ime:
+            self.adb_shell("input", "keyevent", "KEYCODE_BACK")
+            time.sleep(0.8)
+        self.adb_shell("input", "keyevent", "KEYCODE_BACK")
+        self._log_action("back", f"ime={was_ime}, expect={expect}", t0)
+        if expect is None:
+            return True
+        if self.wait_activity(expect, timeout=timeout):
+            return True
+        # 兜底：可能是 IME 判据失灵（候选栏等 mInputShown 漏报）或多层弹层
+        if not silent:
+            print(f"   ↩ 返回后未到达 {expect!r}（当前 {self.current_activity()}），补按一次")
+        self.adb_shell("input", "keyevent", "KEYCODE_BACK")
+        return self.wait_activity(expect, timeout=timeout)
+
+    # ── 通用视觉排序（图库/相册选图）─────────────────────────────────
+    # 通用能力：任何"从一堆缩略图里挑出目标类型图片"的场景都适用
+    # （课程表导入、扫描识别、相册选图…）。与具体 App 无关，故放框架层。
+    # 背景：183 反复选错图 BLOCKED，根因是只比"高/中/低"等级导致同级并列。
+
+    @staticmethod
+    def verdict_score(ans, *, positive=(), negative=(), vague=()):
+        """把视觉判词转成可比较的分数（比只看"高/中/低"精细）。
+
+        **教训（183 实测）**：这两句旧代码视为完全一样（都只取到等级"高"）——
+            「高。…顶部**似有**横向表头」            ← 模糊
+            「高。…顶部有"时间+**星期一至星期五**"表头」← 确切读出文字
+        并列后排序退化成原序，选中模糊的那张 → App 判定不是课程表 → BLOCKED。
+        所以必须把**确定度措辞**纳入排序。
+
+        **另一个坑**：纯关键词计数会被**否定句**骗——
+            「低。…**未呈现**…星期表头与网格」同样含关键词，计数和正例一样高。
+        故否定词必须**优先重罚**，压过前面的"高"。
+
+        positive: 目标类型的确切特征词（读到即加分，如"星期一""时间段"）
+        negative: 否定词（默认内置通用否定词）
+        vague:    模糊措辞（默认内置）
+        """
+        s = ans or ""
+        if "高" in s:
+            score = 30
+        elif "中" in s:
+            score = 20
+        elif "低" in s:
+            score = 10
+        else:
+            score = 5                      # 没给等级（含"视觉不可用"）→ 最保守
+        # 默认否定/模糊词一律**通用**：不许出现具体 App 的文案
+        #（分层边界硬规则 L78；曾误写"无课程表"，已移除——
+        #  目标类型专属的否定词应由调用方经 negative= 传入）
+        neg = negative or ("未见", "不是", "并非", "未呈现", "没有", "不含",
+                           "无法确认")
+        vag = vague or ("似有", "似乎", "可能", "疑似", "像是", "难以确认")
+        if any(w in s for w in neg):
+            score -= 40                    # 否定优先，压过前面的"高"
+        if any(w in s for w in vag):
+            score -= 8
+        for w, bonus in (positive or ()):
+            if w in s:
+                score += bonus
+        return score
+
+    def rank_by_vision(self, nodes, prompt, positive=(), negative=(), vague=(),
+                       limit=9, bounds_key="bounds_xy", verbose=True):
+        """按视觉判词给节点排序（降序），用于"从缩略图里挑目标图"。
+
+        对每个节点调 vision_ask(prompt, bounds=节点 bounds)，用
+        verdict_score 打分后降序排。返回 [(node, ans), ...]。
+        视觉不可用的节点按保守分（5）参与排序，不会崩链路。
+        positive: [(特征词, 加分), ...] 传给 verdict_score。
+        """
+        scored = []
+        for n in nodes[:limit]:
+            try:
+                ans = (self.vision_ask(prompt, bounds=n[bounds_key]) or "").strip()
+            except Exception as e:
+                ans = f"(视觉不可用:{e})"
+            scored.append((n, ans, self.verdict_score(
+                ans, positive=positive, negative=negative, vague=vague)))
+        scored.sort(key=lambda it: -it[2])
+        if verbose and scored:
+            print("   🔍 视觉排序: " + " | ".join(
+                f"候选{i+1}:{a[:36]}" for i, (_, a, _s) in enumerate(scored)))
+        return [(n, a) for n, a, _s in scored]
 
     # ── App 私有导航辅助一律不放框架：入口长什么样、在哪、点完验证什么，
     #    都是具体 App 的知识（knowledge/<包名>.md）或 cases/<包名>/_flow.py 的职责。
@@ -1757,7 +1994,18 @@ class TestCase:
         pkg: 缓存归属包名。探查系统页（PhotoPicker 等）时前台包是系统包，
         必须显式传被测 App 包名（如 pkg="com.zui.calendar"），否则缓存
         散到系统包名下，后续按被测包名检索不到、只能重探真机。
+
+        **自动开启采集会话**（2026-09-10 起）：调用本方法即视为"探查模式"，
+        自动 set_trace() —— 之后每次 _dump() 的 UI 树快照与关键事件全部落盘
+        storage/traces/<用例名>/<会话>/。此前该机制**从未被启用过**
+        （storage/traces/ 从未存在），只因它要求调用方"记得调 set_trace()"；
+        探查产物本该是默认行为，不该靠自觉。正式回归不调 probe_page，
+        故零额外 IO、行为不变。
+        （注：采集脚本 `_collect_*.py` 已在 TestCase 构造时自动开 trace，
+          见 _maybe_auto_trace；此处是给"正式用例里临时探一下"的兜底。）
         """
+        if getattr(self, "trace", None) is None or not self.trace.enabled:
+            self.set_trace()          # 幂等：已开启则直接返回现有会话
         xml = self.cached_dump(label, ttl=ttl, refresh=refresh, pkg=pkg)
         nodes = [{
             "rid": n["rid"], "text": n["text"], "desc": n["desc"],
@@ -1782,12 +2030,111 @@ class TestCase:
         import json
         d = self._probe_dir(label, pkg=pkg)
         os.makedirs(d, exist_ok=True)
-        with open(os.path.join(d, "meta.json"), "w", encoding="utf-8") as f:
+        now = datetime.now().isoformat(timespec="seconds")
+        meta_path = os.path.join(d, "meta.json")
+        # accessed：**最后访问时间**，每次重采/重读刷新，作为超时清理的基准
+        #（不是创建时间——写用例可能跨数小时，按创建时间会在使用中删掉
+        #  正在查的缓存，183 从探查到验证通过跨 2 小时）。
+        # created：首次采集时间，仅供追溯。
+        created = now
+        if os.path.isfile(meta_path):
+            try:
+                with open(meta_path, encoding="utf-8") as f:
+                    created = json.load(f).get("created") or now
+            except (OSError, ValueError):
+                pass
+        with open(meta_path, "w", encoding="utf-8") as f:
             json.dump({"label": label, "package": fg_pkg,
-                       "ts": datetime.now().isoformat(timespec="seconds"),
+                       "created": created, "accessed": now,
+                       "ts": now,
                        "texts": info["texts"], "rids": info["rids"]},
                       f, ensure_ascii=False, indent=1)
         return info
+
+    @staticmethod
+    def cleanup_probes(max_idle_min=30, verbose=True):
+        """清理**超时未访问**的探查缓存（storage/probes/<包名>/<label>/）。
+
+        规则（2026-09-10 讨论定稿）：读 meta.json 的 `accessed`（最后访问时间），
+        距今超过 max_idle_min 分钟 → 删该 label 目录。缺 accessed 时退回看
+        meta.json 的 mtime（老缓存没有该字段）。
+
+        **为什么按时间自动删而不是靠 AI 记得删**：若落盘靠 AI 自觉、删除也靠
+        AI 自觉，就是一个自觉弥补另一个自觉。物证：2026-09-10 当天
+        D:\\dsh 下 15 个临时探针脚本全部未清理。
+        **为什么是"最后访问"而非"创建"**：写用例可能跨数小时（183 探查→验证
+        跨 2 小时），按创建时间会在使用中删掉正在查的缓存，反而逼着重跑真机。
+
+        返回 (删除数, 保留数)。由 run_case.py 启动时调用。
+        """
+        import json
+        if not os.path.isdir(PROBE_DIR):
+            return (0, 0)
+        cutoff = time.time() - max_idle_min * 60
+        removed = kept = 0
+        for pkg_name in os.listdir(PROBE_DIR):
+            pkg_dir = os.path.join(PROBE_DIR, pkg_name)
+            if not os.path.isdir(pkg_dir):
+                continue
+            for label in os.listdir(pkg_dir):
+                d = os.path.join(pkg_dir, label)
+                if not os.path.isdir(d):
+                    continue
+                meta_path = os.path.join(d, "meta.json")
+                stamp = None
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path, encoding="utf-8") as f:
+                            raw = json.load(f).get("accessed")
+                        if raw:
+                            stamp = datetime.fromisoformat(raw).timestamp()
+                    except (OSError, ValueError):
+                        stamp = None
+                if stamp is None:
+                    try:                      # 老缓存无 accessed → 退回文件 mtime
+                        stamp = os.path.getmtime(meta_path)
+                    except OSError:
+                        stamp = None
+                if stamp is not None and stamp < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+                    if verbose:
+                        idle = int((time.time() - stamp) / 60)
+                        print(f"   🧹 清理探查缓存（{idle} 分钟未访问）: {pkg_name}/{label}")
+                    removed += 1
+                else:
+                    kept += 1
+        return (removed, kept)
+
+    @staticmethod
+    def list_probes():
+        """列出当前探查缓存（供 run_case.py 提示"还有旧的 X 份，要删吗"）。
+
+        返回 [{"pkg","label","idle_min","accessed"}, ...]，按空闲时间降序。
+        """
+        import json
+        out = []
+        if not os.path.isdir(PROBE_DIR):
+            return out
+        for pkg_name in os.listdir(PROBE_DIR):
+            pkg_dir = os.path.join(PROBE_DIR, pkg_name)
+            if not os.path.isdir(pkg_dir):
+                continue
+            for label in os.listdir(pkg_dir):
+                d = os.path.join(pkg_dir, label)
+                meta_path = os.path.join(d, "meta.json")
+                if not os.path.isdir(d) or not os.path.isfile(meta_path):
+                    continue
+                try:
+                    with open(meta_path, encoding="utf-8") as f:
+                        m = json.load(f)
+                    ts = datetime.fromisoformat(m.get("accessed") or m["ts"])
+                except (OSError, ValueError, KeyError):
+                    continue
+                out.append({"pkg": pkg_name, "label": label,
+                            "idle_min": int((time.time() - ts.timestamp()) / 60),
+                            "accessed": m.get("accessed") or m.get("ts")})
+        out.sort(key=lambda r: -r["idle_min"])
+        return out
 
     def find_nodes(self, label=None, rid_re=None, text_re=None,
                    cls_re=None, clickable=None, ttl=None, pkg=None):
@@ -1801,7 +2148,12 @@ class TestCase:
             d = {"rid": n["rid"], "text": n["text"],
                  "desc": n["desc"], "cls": n["cls"],
                  "bounds": n["bounds"], "bounds_xy": n["bounds_xy"],
-                 "clickable": n["clickable"] == "true"}
+                 "clickable": n["clickable"] == "true",
+                 # enabled / checked（2026-09-11 补）：置灰与勾选态是常用断言
+                 # 判据，_parse_nodes 已解析却在旧版被丢掉，导致用例只能拿到
+                 # None、误判 FAIL（185 首跑 6 条误报就是这么来的）。
+                 # 保留**原始字符串**（"true"/"false"）便于直接比较与打印。
+                 "enabled": n.get("enabled"), "checked": n.get("checked")}
             if rid_re and not re.search(rid_re, d["rid"]):
                 continue
             if text_re and not re.search(text_re, d["text"]):
@@ -1880,6 +2232,10 @@ class TestCase:
         # 用例没跑完，断言统计再好看也不可信 → 结论按 ERROR 压过一切。
         if self._fatal_error is not None:
             self.final_status = "ERROR"
+        # ── 清场：任何退出路径（正常 return / 抛异常 / CaseAbort）都执行 ──
+        # 必须在漂移检测之前：清场动作本身会改设备状态，放后面会被 env_diff
+        # 判成"用例污染环境"，反而制造假 WARN（清场是为了消除污染，不是制造）。
+        self._run_cleanups()
         # ── 环境漂移检测：用例是否污染了设备环境 ─────────────────
         # 非 ERROR 时才检测（ERROR = 用例没跑完，环境状态不可信）。
         # WARN 不覆盖 FAIL/ERROR，只在 PASS 时升级为 WARN。

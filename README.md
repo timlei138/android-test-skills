@@ -10,7 +10,8 @@ bash scripts/setup.sh
 # Windows: pwsh -File scripts/setup.ps1（脚本参数与细节见 docs/OPS.md）
 
 # 2. 跑示例用例（工作区 cases/ 是单一数据源，setup 时从 skill 包复制）
-.venv/bin/python run_case.py com.zui.calendar/172.py
+#    run_case.py 在 framework/ 下，需先 cd 进去
+cd framework && ../.venv/bin/python run_case.py com.zui.calendar/172.py
 # → 报告自动生成到工作区 storage/reports/（Windows 用 pwsh -File scripts/run_case.ps1 -Case "com.zui.calendar/172.py"）
 
 # 3. 写自己的用例（参考 cases/com.zui.calendar/ 示例）

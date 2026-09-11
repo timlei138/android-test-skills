@@ -294,6 +294,33 @@ def main():
     user_input = extract_user_input(path)
     if user_input is not None:
         os.environ["DSH_CASE_USER_INPUT"] = user_input
+    else:
+        # 无 USER_INPUT = 辅助脚本（探查/补采/备数据/补验/框架自测）——
+        # 按用户 2026-09-11 定的规则**完全不入库**（B1）。这里明说一句，
+        # 免得"跑了但没记录"被当成 bug 查半天。
+        # 正式用例漏写 USER_INPUT 也会走到这里 → 记录库里就查不到，所以下面
+        # 用 _looks_like_formal_case 给一个显眼提醒（不阻断：探查脚本本就该无）。
+        _warn_missing_user_input(path)
+
+    # 探查缓存维护（2026-09-10 讨论定稿）：探查产物用完即弃——
+    # 超过 30 分钟未访问的 storage/probes/ 目录由**代码**自动删除，
+    # 不靠人/AI 记得清理（"一个自觉弥补另一个自觉"）。
+    # 每次跑用例都做一次，等于把清理挂在最频繁的入口上。
+    try:
+        from test_framework import TestCase as _TC
+        _removed, _kept = _TC.cleanup_probes(max_idle_min=30)
+        if _removed:
+            print(f"[探查缓存] 已清理 {_removed} 份超时（>30 分钟未访问），保留 {_kept} 份")
+        _stale = _TC.list_probes()
+        if _stale:
+            print(f"[探查缓存] 现有 {len(_stale)} 份（还在 30 分钟窗口内，本次不删；"
+                  f"最新 X 分钟前访问）".replace("X", str(_stale[0]["idle_min"])))
+            for _s in _stale[:5]:
+                print(f"           {_s['pkg']}/{_s['label']}  {_s['idle_min']} 分钟前访问")
+            if len(_stale) > 5:
+                print(f"           …另有 {len(_stale) - 5} 份")
+    except Exception as _e:
+        print(f"[探查缓存] 维护跳过: {_e}")
 
     spec = importlib.util.spec_from_file_location("testcase", path)
     mod = importlib.util.module_from_spec(spec)
@@ -376,6 +403,24 @@ def extract_user_input(path: str) -> str | None:
     except OSError:
         return None
     return extract_user_input_from_source(source)
+
+
+def _warn_missing_user_input(path: str) -> None:
+    """无 USER_INPUT 时提示一句（不阻断执行）。
+
+    判定"疑似正式用例"用**文件名是否纯数字**：正式用例约定命名 = `<用例号>.py`
+    （119.py / 185.py），辅助脚本是描述性名字（`_collect_185.py`、
+    「探查_186_设为当前与清空」）。纯数字名却没有 USER_INPUT → 多半是漏写，
+    点出来（否则它跑完静默不入库，人查记录时以为丢数据）。
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem.isdigit():
+        print(f"⚠️ [记录] 正式用例 {stem}.py 缺少 USER_INPUT 常量 → "
+              f"本次执行不会写入记录库。\n"
+              f"         请在脚本顶部补：USER_INPUT = \"\"\"<用户原始口述用例>\"\"\"")
+    else:
+        print(f"[记录] {stem} 无 USER_INPUT → 按辅助脚本处理，不入记录库"
+              f"（报告/截图/trace 照常生成）")
 
 
 if __name__ == "__main__":

@@ -252,48 +252,82 @@ def _visible_thumbs(t):
     return t.find_nodes(rid_re=r"icon_thumbnail$")
 
 
+
+# IME 感知的返回键与视觉排序评分已提升到框架层（通用能力，所有 App 适用）：
+#   TestCase.ime_shown() / TestCase.back()          —— 框架 test_framework.py
+#   TestCase.verdict_score() / TestCase.rank_by_vision()
+# _flow 里保留薄封装，一是维持既有调用点不变，二是把日历专属的
+# positive 特征词（星期表头/节次）集中在这里，不污染框架。
+_SAFE_BACK = True   # 标记：本模块的 _safe_back 已委托框架层
+
+
+def _ime_shown(t):
+    """输入法是否弹起（委托框架层，保留此名以免改动历史调用点）。"""
+    return t.ime_shown()
+
+
+def _safe_back(t):
+    """IME 感知的返回键（委托框架层 TestCase.back()）。"""
+    return t.back()
+
+
+def _verdict_score(t, ans):
+    """视觉判词评分（委托框架层 t.verdict_score，带日历专属正向特征词）。
+
+    正向特征词是**课程表**这一目标类型的知识，属于本 App 用例层职责；
+    通用的"否定优先/模糊降权"逻辑在框架里。
+    """
+    return t.verdict_score(
+        ans,
+        positive=(("星期一", 6), ("星期二", 6), ("星期三", 6), ("星期四", 6),
+                  ("星期五", 6), ("星期六", 6), ("星期日", 6), ("周末", 6),
+                  ("星期表头", 6), ("时间段", 4), ("节次", 4)))
+
+
 def _rank_thumbs(t, thumbs):
-    """视觉排序：逐张裁剪送 vision_ask 判"是否像课程表"。
+    """视觉排序缩略图（委托框架层 rank_by_vision + 日历正向特征词）。
 
     只依据通用结构特征（网格/星期表头/课程单元格），不依赖颜色风格——
     素材可能不止一种课表样式，素材特征写进提示词反而是干扰（讨论定稿）。
-    返回 [(node, verdict), ...] 按可能性降序；视觉不可用时保持网格序兜底。
+    返回 [(node, verdict), ...] 降序；视觉不可用时按保守分兜底。
     注意：缩略图小（~110px），本排序只决定尝试顺序；权威判定在裁剪页
     大图预检 + App 失败弹窗。
     """
-    LEVEL = {"高": 0, "中": 1, "低": 2}
-    ranked = []
-    for n in thumbs[:9]:    # 只排首屏前 9 张，控制视觉调用成本
-        try:
-            ans = t.vision_ask(
-                "这是一张手机图库的缩略图。它是否像一张'课程表'图片？"
-                "只依据通用结构特征判断：表格/网格布局、顶部星期表头、"
-                "单元格含课程名或时间段文字。不依赖颜色风格。"
-                "回答格式：可能性(高/中/低)，加一句理由。",
-                bounds=n["bounds_xy"])
-            ranked.append((n, (ans or "").strip()))
-        except Exception as e:
-            ranked.append((n, f"(视觉不可用:{e})"))
-    ranked.sort(key=lambda it: next(
-        (lv for k, lv in LEVEL.items() if k in it[1]), 3))
-    return ranked
+    return t.rank_by_vision(
+        thumbs,
+        "这是一张手机图库的缩略图。它是否像一张'课程表'图片？"
+        "只依据通用结构特征判断：表格/网格布局、顶部星期表头、"
+        "单元格含课程名或时间段文字。不依赖颜色风格。"
+        "回答格式：可能性(高/中/低)，加一句理由。",
+        positive=(("星期一", 6), ("星期二", 6), ("星期三", 6), ("星期四", 6),
+                  ("星期五", 6), ("星期六", 6), ("星期日", 6), ("周末", 6),
+                  ("星期表头", 6), ("时间段", 4), ("节次", 4)))
 
 
 def _ensure_grid(t, wait_s=12):
-    """确保停在照片网格：已在网格直接成功；否则 BACK 一次再条件等待。
+    """确保停在照片网格：已在网格直接成功；否则返回并条件等待。
 
     （失败弹窗点「知道了」后可能已自动回网格，此时再 BACK 会退出
     PhotoPicker——所以先查网格，查不到才 BACK。）
+
+    183 实测（2026-09-10）：原来只按**一次** BACK，在输入法弹起时被吞掉，
+    导致连续 3 次 BLOCKED「失败弹窗处理后未回到照片网格」。
+    改为：IME 感知（t.back()）+ 最多 4 轮，每轮先确认是否已到网格（到位即停），
+    既不会被 IME 吞掉，也不会因多按而退出 PhotoPicker。
     """
-    for _ in range(3):
-        if t.el_bounds(rid=PHOTO_THUMB):
-            return True
-        _sleep(1.2)
-    t.adb_shell("input", "keyevent", "KEYCODE_BACK")
-    for _ in range(int(wait_s / 1.5)):
-        _sleep(1.5)
-        if t.el_bounds(rid=PHOTO_THUMB):
-            return True
+    deadline = time.time() + wait_s
+    for _attempt in range(4):
+        for _ in range(3):                      # 每轮先给自动回网格的机会
+            if t.el_bounds(rid=PHOTO_THUMB):
+                return True
+            _sleep(0.8)
+        if time.time() >= deadline:
+            break
+        t.back()                                 # IME 弹着会自动多按一次
+        for _ in range(6):                       # 条件等待返回生效
+            _sleep(1.0)
+            if t.el_bounds(rid=PHOTO_THUMB):
+                return True
     return False
 
 

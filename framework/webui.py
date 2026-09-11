@@ -193,6 +193,19 @@ def _case_meta(fname: str, full: str) -> dict:
     }
 
 
+def _is_shared_case(rel: str) -> bool:
+    """判断相对路径是否为共享模块（非可执行用例、UI 不可删）。
+
+    规则与 run_case.py 的收集逻辑严格对齐：目录名以 _ 开头（如 _lib/）时
+    整目录不扫描，文件名以 _ 开头时该文件不是用例。只看 basename 会漏掉
+    _lib/inventory.py 这类放在共享目录下、文件名却很正常的文件。"""
+    parts = rel.split("/")
+    if not parts:
+        return False
+    # 任一层目录以 _ 开头 → 整目录是共享目录；文件名以 _ 开头 → 共享模块
+    return any(p.startswith("_") for p in parts[:-1]) or parts[-1].startswith("_")
+
+
 def _safe_case_name(name: str):
     """防止路径穿越；接受 .py 文件名或 <包名目录>/<文件>.py 相对路径。
     用例按包名分目录存放（cases/com.zui.calendar/172.py），目录即命名空间。
@@ -642,19 +655,27 @@ class Handler(BaseHTTPRequestHandler):
             # 用例脚本列表。用例按被测 App 包名分目录（cases/<包名>/<编号>.py），
             # 递归收集；name 用相对路径（如 "com.zui.calendar/172.py"）展示与定位。
             # _ 开头（_flow.py / _set_time_tap.py / _template.py）是共享模块，
-            # 不是可执行用例，不在列表展示 —— 与 run_case.py 的过滤规则一致。
+            # 不是可执行用例 —— run_case.py 的收集逻辑仍会过滤掉它们。
+            # 但它们是人工维护的资产，UI 里要能查看和编辑，因此照常列出并打
+            # shared 标记：「在列表里展示」与「可作为用例执行」是两件事。
+            # shared 的模块被多个用例 import，UI 不提供删除入口，后端 DELETE
+            # 也再挡一层，避免误删导致一批用例 import 失败。
             try:
                 rows = []
                 for root, dirs, files in os.walk(CASES_DIR):
                     dirs[:] = [d for d in dirs
                                if d != "__pycache__" and not d.startswith(".")]
                     for f in files:
-                        if not f.endswith(".py") or f.startswith("_"):
+                        if not f.endswith(".py"):
                             continue
                         fp = os.path.join(root, f)
                         rel = os.path.relpath(fp, CASES_DIR).replace(os.sep, "/")
-                        rows.append(_case_meta(rel, fp))
-                rows.sort(key=lambda r: -r["mtime"])
+                        meta = _case_meta(rel, fp)
+                        meta["shared"] = _is_shared_case(rel)
+                        rows.append(meta)
+                # 共享模块沉到列表末尾：它们不是可执行用例，不应占据按修改时间
+                # 排序的头部位置，避免把真正要跑的用例挤下去。
+                rows.sort(key=lambda r: (r["shared"], -r["mtime"]))
                 self._json(rows)
             except OSError as e:
                 self._json({"error": str(e)}, 500)
@@ -889,6 +910,12 @@ class Handler(BaseHTTPRequestHandler):
             fp = os.path.join(CASES_DIR, name) if name else None
             if not name or not fp or not os.path.isfile(fp):
                 self._json({"error": "not found"}, 404)
+                return
+            # 共享模块（_ 开头的目录或文件）不可删：它们被同目录用例 import，
+            # 删掉会让一批用例在收集阶段就 import 失败。UI 已隐藏删除入口，
+            # 这里再挡一层，防止绕过界面直接调接口。判定与列表展示同源。
+            if _is_shared_case(name):
+                self._json({"error": f"{name} 是共享模块（被其他用例 import），不可删除"}, 403)
                 return
             # safe_remove：以「文件还在不在」判定成败。某些环境会把删除改走
             # 回收站（文件已删但仍抛异常），只有文件还在才算真失败。

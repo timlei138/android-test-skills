@@ -70,9 +70,20 @@ def parse_nodes(xml):
 
 
 def app_nodes(nodes, pkg):
-    """过滤：App 自有节点 + android 弹框骨架。去掉系统状态栏/导航装饰。"""
+    """过滤：App 自有节点 + android 弹框骨架 + **无 rid 的节点**。
+    去掉系统状态栏/导航装饰。
+
+    无 rid 的节点必须保留（2026-09-11 修）：按 rid 前缀过滤会**丢掉所有没有
+    resource-id 的文本节点**，而空状态文案、纯文本提示正是断言最常用的东西
+    （实例：课程表空状态页「还未添加课程表」rid 为空，导致 verify 报
+    "未命中（改 label 或核对文案）"——文案明明是对的，提示却把人引向
+    改文案，逼着人改用全屏 screen_text 扫描，慢且脆）。
+    无 rid 的节点不属于任何包，按"当前页内容"保留。
+    """
     return [n for n in nodes
-            if n["rid"].startswith(pkg + ":id/") or n["rid"] in KEEP_ANDROID]
+            if (not n["rid"])                       # 无 rid：页面文本，保留
+            or n["rid"].startswith(pkg + ":id/")    # App 自有
+            or n["rid"] in KEEP_ANDROID]            # android 弹框骨架
 
 
 def short_rid(rid, pkg):

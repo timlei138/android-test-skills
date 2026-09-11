@@ -11,13 +11,35 @@
 ## Windows 脚本参数与细节
 
 Windows 脚本参数：
-- `setup.ps1 [-Workspace <路径>] [-Python <解释器>] [-SkipDeviceCheck] [-Recreate] [-WithAgent]`
+- `setup.ps1 [-Workspace <路径>] [-Python <解释器>] [-SkipDeviceCheck] [-Recreate] [-WithAgent] [-Smoke]`
 - `run_case.ps1 -Case <用例> [-List] [-Workspace <路径>]`
-- `webui.ps1 <start|stop|status|restart> [-Port 8900]`
+  - `-List` / 裸名 / 模糊匹配的查找**会排除共享模块**（路径任一层以 `_` 开头，
+    如 `_flow.py`、`_lib/inventory.py`），与 `run_case.py` 的执行收集规则一致 ——
+    列出的即是可执行用例，工具模块不会混进来。
+- `webui.ps1 <start|stop|status|restart> [-Port 8900] [-HostAddr <地址>]`
+  - 监听地址参数名是 **`-HostAddr`，不是 `-Host`**：`$Host` 是 PowerShell 只读自动变量
+    （Constant/AllScope），拿它当 param 名会在参数绑定阶段直接失败，脚本根本起不来。
 
 Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理两项 Windows 特有问题：
 原生命令 stderr 日志不触发 `NativeCommandError` 中断、强制 `PYTHONUTF8=1` 避免 GBK 编码 emoji 崩溃。
 默认工作区 `~/android-test-skills-data`（Windows 下为 `C:\Users\<你>\android-test-skills-data`）。
+
+### 改完 .ps1 必跑：BOM 校验
+
+PowerShell 5.1 读**无 BOM** 的 `.ps1` 会按系统 ANSI 代码页（中文 Windows = GBK）解析，
+脚本里的中文注释/输出与 emoji 会变乱码，乱码一旦破坏引号或括号配对，整个脚本直接语法崩溃。
+实测把 `run_case.ps1` 的 BOM 去掉后有 **7 个语法错误、完全无法执行**。
+
+> 常见触发场景：多数编辑/生成工具**重写文件时不保留 BOM**。本项目已踩两次（改 `webui.ps1`、
+> `run_case.ps1` 后丢失）。`git` 与文件复制不会弄丢 BOM，**重写**才会。
+
+```powershell
+pwsh -File scripts/check_bom.ps1            # 只校验，缺 BOM 时退出码 1
+pwsh -File scripts/check_bom.ps1 -Fix       # 自动补回缺失的 BOM
+```
+
+判定标准只有一条：文件开头 3 字节 = `EF BB BF`。别凭"改的是 ASCII 部分"来判断——
+改完就跑一次脚本，比事后对着乱码报错排查便宜得多。
 
 ## 测试记录查询（SQLite）
 
@@ -26,7 +48,8 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
 
 ## Web 前端（查看记录 + 编辑知识库，随 skill 打包分发）
 
-- **位置**：本 skill 包内（`scripts/webui.sh`，实现为 `framework/webui.py` + `framework/webui.html`）
+- **位置**：本 skill 包内（`scripts/webui.sh`，实现为 `framework/webui.py` + `webui.html`
+  + `webui.js` + `webui.css`；页面还加载 `codemirror.bundle.js`，均本地打包、离线可用）
 - **启动**：`./scripts/webui.sh` → 打开 http://127.0.0.1:8900（`stop`/`status`/指定端口）
 - **数据定位**（显式，不依赖脚本所在目录）：
   - 环境变量 `DSH_WORKSPACE_DIR` 指定测试工作区（其下 `storage/` 含 test_records.db + 截图/报告）
@@ -35,6 +58,11 @@ Windows 脚本为 **PowerShell 5.1 兼容 + UTF-8 with BOM**；已内置处理�
   - 未跑过 setup 时兜底命中 skill 包的 `cases/` 与 `knowledge/`
   - 打包给别人：对方装好 skill 后跑 `scripts/setup.sh` 建工作区，直接 `./scripts/webui.sh` 即可
 - **测试记录**页：用例列表（通过/失败徽章、搜索、筛选）→ 详情含 用户输入/脚本/状态/证据
+- **Case** 页：查看/编辑 `cases/` 下用例脚本（搜索、步骤数、修改时间；可删除普通用例）
+  - `_` 开头的共享模块（`_flow.py` / `_template.py` / `_lib/` 等）**也会列出**，带蓝色
+    「共享」徽章、排在列表末尾、**无删除按钮**（后端 DELETE 亦返回 403）——它们被同目录
+    用例 `import`，删掉会让一批用例 import 失败
+  - 它们只是「可查看/编辑的资产」，**不可作为用例执行**：`run_case` 收集时仍排除
 - **知识库**页：CodeMirror 编辑器查看/编辑 `knowledge/*.md`（高亮、行号、括号匹配），文件名白名单防路径穿越
   - `_template.md` **只读**（新建卡的样式源）；`_system.md` **禁删但可编辑补充**
   - 新建知识卡自动套用 `_template.md` 全文；MD 无语法校验，保存只拦空文件
@@ -88,6 +116,19 @@ skill 包兜底（未跑过 setup 时兜底命中）。改用例/知识卡一律
 
 > 排查端口占用 / 进程命令行用系统自带命令即可（`netstat -ano | findstr :<port>` 拿 PID，再用 PID 查命令行）。  
 > 注意：`wmic.exe` 在本机被安全策略屏蔽，**不要**用它，改用 PowerShell 的 CIM 查询。
+
+### 首屏一直停在「加载中…」
+
+Dashboard 卡片里的「加载中…」是 **HTML 写死的静态占位符**，只有 `loadDashboard()`
+执行成功才会被替换。而 `show()` 只由侧栏按钮的 `onclick` 触发 —— 若 `webui.js` 末尾的
+首屏初始化缺失或被清掉，首屏就永远卡在占位符上，**点一下侧栏 Dashboard 又立刻正常**
+（这是最典型的识别特征）。
+
+排查顺序：
+
+1. 先看是不是 JS 没生效：改完 `webui.js` 必须**杀进程重启**（见上一条的页缓存）。
+2. 确认页面返回的 JS 里有首屏初始化段（对比 `/webui.js` 响应内容与源文件）。
+3. 若接口有数据而页面空着，那是前端没调用，不是后端问题：单独请求 `/api/dashboard` 验证。
 
 ### Web UI 删除失败（SHFileOperationW 0x2 / Failed to fetch）
 

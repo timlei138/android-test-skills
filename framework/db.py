@@ -598,6 +598,41 @@ class RecordDB:
             pass
         return removed
 
+    def drop_previous_cases(self, name, script_path=None, keep_id=None,
+                            remove_artifacts=True):
+        """删除**同一用例**的历史执行记录，只留最新一次（用户 2026-09-11 定）。
+
+        为什么需要：同一个用例脚本反复跑（改一版跑一次、复跑验证稳定性）会
+        每次都插一条 cases，导致记录库里同一用例几十条、且旧的多是中间 FAIL
+        状态，人看记录时噪声盖过结论。子表（steps/results/step_evidences/
+        step_actions）按 case_id 挂着，只删 cases 行会留孤儿数据。
+
+        - name        用例名（cases.name）
+        - script_path 用例脚本路径：给了就精确匹配，避免误删"同名不同包"
+        - keep_id     保留的记录 id（通常是刚 start_case 出来的本次记录）
+        - remove_artifacts=True 时连带清理旧报告与截图（复用 delete_case）
+
+        返回删除的记录数。失败不抛（记录清理不该阻断用例执行）。
+        """
+        removed = 0
+        try:
+            with self._lock:
+                conn = self._connect()
+                sql = "SELECT id FROM cases WHERE name=?"
+                args = [name]
+                if script_path:
+                    sql += " AND script_path=?"
+                    args.append(script_path)
+                ids = [r[0] for r in conn.execute(sql, args).fetchall()]
+            for cid in ids:
+                if keep_id is not None and cid == keep_id:
+                    continue
+                self.delete_case(cid, remove_artifacts=remove_artifacts)
+                removed += 1
+        except Exception:
+            pass          # 清理失败不影响本次记录写入
+        return removed
+
     def _remove_artifacts(self, evidence_paths, report_path, case_id):
         """删除一次执行的磁盘产物（截图目录 + 报告及同前缀备份），返回删除数。"""
         removed = 0

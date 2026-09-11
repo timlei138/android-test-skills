@@ -415,9 +415,16 @@ function renderScripts() {
   if (empty) empty.style.display = 'none';
   el.innerHTML = list.map(s => {
     const desc = escapeHtml(s.description || '');
+    // 共享模块（_ 开头，如 _flow.py）：可被多个用例 import，不是可执行用例。
+    // 列表里照常展示以便查看/编辑，但不给删除入口（后端也拒绝删除）。
+    const tag = s.shared
+      ? ' <span class="badge b-SHARED" title="共享模块：被同目录用例 import，不是可执行用例，不可删除">共享</span>'
+      : '';
+    const delBtn = s.shared ? '' :
+      '<button class="del-btn" onclick="event.stopPropagation();deleteScript(\''+encodeURIComponent(s.name)+'\')">删除</button>';
     // 整行可点击查看（与历史记录列表一致），删除按钮需阻止冒泡
     return '<tr class="row-click" onclick="openScript(\''+encodeURIComponent(s.name)+'\')" title="点击查看/编辑">' +
-      '<td><b>'+escapeHtml(s.name)+'</b></td>' +
+      '<td><b>'+escapeHtml(s.name)+'</b>'+tag+'</td>' +
       '<td><div class="truncate" title="'+desc+'">'+escapeHtml(firstLine(s.description))+'</div></td>' +
       '<td class="mono" style="text-align:center">'+(s.steps||0)+'</td>' +
       '<td class="mono" style="font-size:11px;color:var(--text-3)">'+fmtTime(s.mtime)+'</td>' +
@@ -425,9 +432,7 @@ function renderScripts() {
       // 脱离表格布局，浏览器补一个匿名单元格，底边框就会跑到按钮下方、且宽度
       // 不再是这一列 —— 表现出来就是"删除按钮下面多了一条线"。
       '<td>' +
-        '<div style="display:flex;gap:6px">' +
-          '<button class="del-btn" onclick="event.stopPropagation();deleteScript(\''+encodeURIComponent(s.name)+'\')">删除</button>' +
-        '</div>' +
+        '<div style="display:flex;gap:6px">' + delBtn + '</div>' +
       '</td>' +
     '</tr>';
   }).join('');
@@ -441,6 +446,13 @@ async function openScript(nameEnc) {
   let mh = '<div class="row"><span class="label">文件名</span><span class="value mono">'+escapeHtml(currentScriptName)+'</span></div>';
   mh += '<div class="row"><span class="label">路径</span><span class="value mono">'+escapeHtml(meta.path||'')+'</span></div>';
   mh += '<div class="row"><span class="label">步骤数</span><span class="value mono">'+(meta.steps||0)+'</span></div>';
+  // 共享模块没有 USER_INPUT 常量，描述通常为空 —— 说明它是什么，避免看起来
+  // 像"一个没有描述的用例"，也顺带交代为什么不给删除入口。
+  if (meta.shared) {
+    mh += '<div class="row"><span class="label">类型</span><span class="value">' +
+          '<span class="badge b-SHARED">共享模块</span> 供同目录用例 import，' +
+          '不是可执行用例，不可删除</span></div>';
+  }
   if (meta.description) mh += '<div class="row"><span class="label">描述</span><span class="value">'+escapeHtml(meta.description)+'</span></div>';
   $('#script-meta').innerHTML = mh;
   $('#script-title').textContent = currentScriptName;
@@ -958,3 +970,15 @@ async function loadDashboard() {
     if (el) el.textContent = '';
   }
 })();
+
+// ── 首屏初始化 ────────────────────────────────────────────────────────
+// HTML 里 dashboard 是默认视图（#nav-dashboard 带 active、#view-dashboard 无
+// 隐藏样式），但 show() 只由侧栏按钮的 onclick 触发 —— 不做初始化，首屏就永远
+// 停在 HTML 写死的「加载中…」占位符上，必须手动点一下 Dashboard 才出数据。
+// 这里直接调 loadDashboard()：只补数据，不复用 show()，避免连带触发其他视图
+// 的加载（show() 里还有 scripts/knowledge/vision 的分支）。
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => { loadDashboard(); });
+} else {
+  loadDashboard();
+}

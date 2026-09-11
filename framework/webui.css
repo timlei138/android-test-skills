@@ -187,6 +187,8 @@ main { flex: 1; min-width: 0; min-height: 0; padding: 24px 28px 32px; overflow-y
 .b-INFO { background: var(--info-dim); color: var(--info); }
 .b-BLOCKED { background: var(--blocked-dim); color: var(--blocked); }
 .b-UNKNOWN { background: var(--panel-3); color: var(--text-3); }
+/* 共享模块标记（_flow.py 等）：复用 info 色，亮/暗主题均有定义 */
+.b-SHARED { background: var(--info-dim); color: var(--info); }
 
 .del-btn {
   background: transparent; border: 1px solid var(--line); border-radius: 6px;

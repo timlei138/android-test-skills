@@ -194,12 +194,17 @@ def run():
             try:
                 ans = t.vision_ask(
                     "截图是 Android 的课程背景色选择区。请数一下里面一共有几个"
-                    "可选颜色块（纯色圆形/圆角方块，不含任何文字）。只回答数字。",
+                    "可选颜色块（纯色圆形/圆角方块，不含任何文字）。"
+                    "先在心里逐行数清，最后只输出一个阿拉伯数字作为总数，不要解释。",
                     bounds=pb)
-                m = re.search(r"\d+", ans or "")
-                num = int(m.group()) if m else -1
+                # 解析必须取「最后一个」数字，不能取第一个：模型常先分段描述
+                # （"第一行 5 个…第二行 5 个…因此答案是 10"），首个数字是某一段的
+                # 数量而非总数。实测取首个数字把正确答案 10 解析成了 5。
+                nums = re.findall(r"\d+", ans or "")
+                num = int(nums[-1]) if nums else -1
                 t.record("PASS" if num == 10 else "FAIL",
-                         f"课程背景色: 视觉模型数色={ans!r}（解析={num}，预期 10）")
+                         f"课程背景色: 视觉模型数色={ans!r}（解析={num}，预期 10；"
+                         f"命中数字序列={nums}）")
             except Exception as e:
                 t.record("WARN", f"课程背景色: 视觉数色调用失败 {e}")
         else:

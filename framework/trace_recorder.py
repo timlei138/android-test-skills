@@ -39,7 +39,7 @@ class TraceRecorder:
     每个用例目录保留最近 max_keep 个会话（start 时自动清理更早的机器产物）。
     """
 
-    def __init__(self, storage_dir, max_keep=None):
+    def __init__(self, storage_dir, max_keep=None, max_idle_min=None):
         self._trace_dir = os.path.join(storage_dir, "traces")
         # max_keep：每用例保留的最近会话数。默认 0 = 不自动清理
         # （批量 rmtree 会撞环境删除护栏中断采集，需清理时显式开启：
@@ -47,6 +47,16 @@ class TraceRecorder:
         if max_keep is None:
             max_keep = int(os.environ.get("DSH_TRACE_MAXKEEP", "0") or 0)
         self.max_keep = max(0, max_keep)
+        # max_idle_min：按空闲时间清理——距**最后修改**超过该分钟数的会话目录删除。
+        # 默认 30 分钟（2026-09-10 讨论定稿）：探查产物用完即弃，
+        # 超时自动删，不靠人/AI 记得清理（"一个自觉弥补另一个自觉"的物证：
+        # 当天 D:\dsh 下 15 个临时探针脚本全部未清理）。
+        # 基准是 mtime 而非创建时间——183 从探查到验证通过跨 2 小时，
+        # 按创建时间会在写用例中途删掉正在查的缓存。
+        # 设 0 可关闭。
+        if max_idle_min is None:
+            max_idle_min = int(os.environ.get("DSH_TRACE_MAXIDLE_MIN", "30") or 0)
+        self.max_idle_min = max(0, max_idle_min)
         self.enabled = False
         self.session_dir = None
         self.ctx = None          # 语义上下文（如 probe:label），snapshot 时登记
@@ -78,14 +88,39 @@ class TraceRecorder:
 
         max_keep<1 直接跳过（默认安全）。在本次新会话创建前调用，故保留
         max_keep-1 个旧会话（预留本次的位），最终每用例目录 ≤ max_keep 个。
+
+        另叠加**按空闲时间**清理（max_idle_min）：距最后修改超过该分钟数的
+        会话目录一并删除。两者独立生效，取其并集。
         """
-        if self.max_keep < 1 or not os.path.isdir(case_root):
+        if not os.path.isdir(case_root):
             return
         try:
             subs = sorted(
                 (d for d in os.listdir(case_root)
                  if os.path.isdir(os.path.join(case_root, d))),
                 key=lambda d: (os.path.getmtime(os.path.join(case_root, d)), d))
+
+            # ① 按空闲时间清理：mtime 距现在超过 max_idle_min 分钟 → 删。
+            #    **基准是 mtime（最后修改）而非创建时间**——写用例可能跨数小时，
+            #    按创建时间会在使用中删掉正在查的缓存（183 探查→验证跨 2 小时）。
+            #    会话目录内任何写入都会刷新 mtime，故"还在用就不会被删"。
+            if self.max_idle_min > 0:
+                cutoff = time.time() - self.max_idle_min * 60
+                keep = []
+                for d in subs:
+                    p = os.path.join(case_root, d)
+                    try:
+                        if os.path.getmtime(p) < cutoff:
+                            shutil.rmtree(p, ignore_errors=True)
+                        else:
+                            keep.append(d)
+                    except OSError:
+                        keep.append(d)
+                subs = keep
+
+            # ② 按数量清理（原行为，默认关闭）
+            if self.max_keep < 1:
+                return
             over = len(subs) - (self.max_keep - 1)   # 预留本次新建的会话位
             for old in subs[:max(0, over)]:
                 shutil.rmtree(os.path.join(case_root, old), ignore_errors=True)
